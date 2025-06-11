@@ -308,7 +308,7 @@ app.get('/api/system-status', async (req, res) => {
   }
 });
 
-/* // Iniciar servidor
+// Iniciar servidor
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor backend escuchando en http://localhost:${PORT}`);
@@ -318,7 +318,7 @@ app.listen(PORT, () => {
   console.log(`  GET /api/stats/:table`);
   console.log(`  GET /api/chart/:table`);
   console.log(`  GET /api/system-status`);
-}); */
+});
 
 module.exports = {
   app,
