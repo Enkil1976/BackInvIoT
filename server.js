@@ -27,10 +27,9 @@ const app = express();
 // Configuración mejorada de CORS
 const corsOptions = {
   origin: [
-    'https://cosmic-dango-25d9b8.netlify.app',
+    'https://invernadero-iot.netlify.app',
     'https://proyectos-iot.onrender.com',
-    'http://localhost:5173',
-    'https://zp1v56uxy8rdx5ypatb0ockcb9tr6a-oci3--5173--858c0e43.local-credentialless.webcontainer-api.io'
+    'http://localhost:5173'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
