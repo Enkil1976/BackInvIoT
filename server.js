@@ -45,7 +45,9 @@ pool.on('error', (err) => logger.error(`PostgreSQL Pool Error: ${err.message}`))
 const app = express();
 
 // CORS Config (mejorado para producción)
-const allowedOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim()) : [];
+const allowedOrigins = process.env.CORS_ORIGINS ? 
+  process.env.CORS_ORIGINS.split(',').map(origin => origin.trim()) : 
+  ['http://localhost:3000', 'http://localhost:3001'];
 
 // Log allowed origins for debugging
 logger.info(`Allowed CORS origins: ${JSON.stringify(allowedOrigins)}`);
@@ -53,21 +55,26 @@ logger.info(`Allowed CORS origins: ${JSON.stringify(allowedOrigins)}`);
 const corsOptions = {
   origin: function (origin, callback) {
     logger.info(`Incoming request from origin: ${origin}`);
-    // Allow requests with no origin (like mobile apps or curl requests)
+    
+    // Permitir requests sin origen (como aplicaciones móviles o curl)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = `The CORS policy for this site does not allow access from the specified origin: ${origin}`;
-      logger.warn(msg);
-      return callback(new Error(msg), false);
+    // Verificar si el origen está en la lista blanca
+    if (process.env.NODE_ENV === 'development' || allowedOrigins.includes(origin)) {
+      return callback(null, true);
     }
-    return callback(null, true);
+    
+    const msg = `The CORS policy for this site does not allow access from the specified origin: ${origin}`;
+    logger.warn(msg);
+    return callback(new Error(msg), false);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar'],
   credentials: true,
-  optionsSuccessStatus: 204,
-  preflightContinue: false
+  maxAge: 86400, // 24 horas
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 };
 
 // Apply CORS with the configuration
