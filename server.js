@@ -1,82 +1,96 @@
+require('dotenv').config();
 const express = require('express');
-const { Client } = require('pg');
+const { Pool } = require('pg');
 const Redis = require('ioredis');
 const cors = require('cors');
 const moment = require('moment');
+const winston = require('winston');
 
+// Configuración de logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.json(),
+  transports: [new winston.transports.Console()],
+});
+
+// Configuración de Redis (con variables de entorno)
 const redisClient = new Redis({
-  host: '2h4eh9.easypanel.host',
-  port: 7963,
-  password: '11211121',
-  username: 'default',
+  host: process.env.REDIS_HOST,
+  port: process.env.REDIS_PORT,
+  password: process.env.REDIS_PASSWORD,
+  username: process.env.REDIS_USER,
   connectTimeout: 5000,
-  retryStrategy: (times) => {
-    console.log(`Reintentando conexión Redis (intento ${times})`);
-    return Math.min(times * 100, 5000);
-  }
+  retryStrategy: (times) => Math.min(times * 100, 5000),
 });
 
-redisClient.on('error', err => {
-  console.error('❌ Error de Redis:', err.message);
+redisClient.on('error', (err) => logger.error(`Redis Error: ${err.message}`));
+redisClient.on('connect', () => logger.info('✅ Redis connected'));
+
+// Pool de PostgreSQL mejorado
+const pool = new Pool({
+  connectionString: process.env.PG_URI,
+  max: 15,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-redisClient.on('connect', () => console.log('✅ Redis conectado correctamente'));
+// Verificar conexión al iniciar
+pool.query('SELECT 1')
+  .then(() => logger.info('✅ PostgreSQL connected'))
+  .catch(err => logger.error('PostgreSQL connection error:', err));
+
+pool.on('error', (err) => logger.error(`PostgreSQL Pool Error: ${err.message}`));
 
 const app = express();
 
-// Configuración mejorada de CORS
+// CORS Config (mejorado para producción)
+const allowedOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim()) : [];
+
+// Log allowed origins for debugging
+logger.info(`Allowed CORS origins: ${JSON.stringify(allowedOrigins)}`);
+
 const corsOptions = {
-  origin: [
-    'https://invernadero-iot.netlify.app',
-    'https://proyectos-iot.onrender.com',
-    'http://localhost:5173'
-  ],
+  origin: function (origin, callback) {
+    logger.info(`Incoming request from origin: ${origin}`);
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = `The CORS policy for this site does not allow access from the specified origin: ${origin}`;
+      logger.warn(msg);
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  preflightContinue: false
 };
 
-// Aplicar CORS a todas las rutas
+// Apply CORS with the configuration
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Habilitar preflight para todas las rutas
 
+// Log all incoming requests for debugging
+app.use((req, res, next) => {
+  logger.info(`[${new Date().toISOString()}] ${req.method} ${req.path} from ${req.get('Origin') || 'no-origin'}`);
+  next();
+});
 app.use(express.json());
 
-const { Pool } = require('pg');
-const pool = new Pool({
-  connectionString: process.env.PG_URI || 'postgres://innovaiq:5Anf0rd01!@2h4eh9.easypanel.host:5423/innovaiq?sslmode=disable',
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 15000
-});
-
-pool.on('error', (err) => {
-  console.error('⚠️ Error en el pool de PostgreSQL:', err);
-});
-
-function calcDewPoint(temp, hum) {
-  if (!temp || !hum) return null;
-  const a = 17.27;
-  const b = 237.7;
-  const alpha = ((a * temp) / (b + temp)) + Math.log(hum / 100);
-  return +(b * alpha / (a - alpha)).toFixed(2);
-}
-
-// ========== MIDDLEWARE & HELPERS ==========
-
-// 🔧 FIXED: Mejor generación de clave de caché
+// Cache Middleware (con invalidación por escritura)
 const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {
+  const cacheKey = `${key}:${req.method}:${req.originalUrl}`;
+  
   try {
-    const cacheKey = `${key}:${req.method}:${req.originalUrl}`;
     const cachedData = await redisClient.get(cacheKey);
-
     if (cachedData) {
       res.set('X-Cache', 'HIT');
       return res.json(JSON.parse(cachedData));
     }
-
+    
     res.locals.cacheKey = cacheKey;
     res.locals.ttl = ttl;
     res.set('X-Cache', 'MISS');
@@ -86,244 +100,360 @@ const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {
   }
 };
 
+// Validación simplificada sin express-validator
+const validateTableParam = (req, res, next) => {
+  const validTables = ['luxometro', 'calidad_agua', 'temhum1', 'temhum2'];
+  if (!validTables.includes(req.params.table)) {
+    return res.status(400).json({ error: 'Tabla no válida' });
+  }
+  next();
+};
+
+// Endpoints para datos históricos
+app.get('/api/chart/:table',
+  validateTableParam,
+  cacheMiddleware('chart-data', 300),
+  async (req, res, next) => {
+    const { table } = req.params;
+    const { hours = 24 } = req.query;
+    
+    try {
+      const result = await pool.query(
+        `SELECT * FROM ${table} 
+         WHERE received_at >= NOW() - INTERVAL '${hours} hours'
+         ORDER BY received_at ASC`
+      );
+      res.json(result.rows);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get('/api/history/:table', 
+  validateTableParam,
+  cacheMiddleware('history-data', 600),
+  async (req, res, next) => {
+    const { table } = req.params;
+    const { limit = 100, page = 1 } = req.query;
+    const offset = (page - 1) * limit;
+
+    try {
+      const result = await pool.query({
+        text: `SELECT * FROM ${table} ORDER BY received_at DESC LIMIT $1 OFFSET $2`,
+        values: [limit, offset]
+      });
+      res.json(result.rows);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get('/api/stats/:table',
+  validateTableParam,
+  cacheMiddleware('stats-data', 3600),
+  async (req, res, next) => {
+    const { table } = req.params;
+    
+    try {
+      // Verificar columnas disponibles
+      const { rows: columns } = await pool.query(
+        `SELECT column_name 
+         FROM information_schema.columns 
+         WHERE table_name = $1`,
+        [table]
+      );
+      
+      const columnNames = columns.map(c => c.column_name);
+      const isTemHumTable = columnNames.includes('temperatura') && columnNames.includes('humedad');
+      const isCalidadAgua = table === 'calidad_agua';
+      const isLuxometro = table === 'luxometro';
+      
+      let query;
+      if (isTemHumTable) {
+        query = `SELECT 
+          DATE(received_at) as fecha,
+          COUNT(*) as total,
+          AVG(temperatura) as avg_temp,
+          MIN(temperatura) as min_temp,
+          MAX(temperatura) as max_temp,
+          AVG(humedad) as avg_humidity,
+          MIN(humedad) as min_humidity,
+          MAX(humedad) as max_humidity
+         FROM ${table}
+         WHERE received_at >= NOW() - INTERVAL '7 days'
+         GROUP BY DATE(received_at)
+         ORDER BY fecha DESC`;
+      } else if (isCalidadAgua) {
+        query = `SELECT 
+          DATE(received_at) as fecha,
+          COUNT(*) as total,
+          AVG(ph) as avg_ph,
+          MIN(ph) as min_ph,
+          MAX(ph) as max_ph,
+          AVG(ec) as avg_ec,
+          MIN(ec) as min_ec,
+          MAX(ec) as max_ec,
+          AVG(ppm) as avg_ppm,
+          MIN(ppm) as min_ppm,
+          MAX(ppm) as max_ppm
+         FROM ${table}
+         WHERE received_at >= NOW() - INTERVAL '7 days'
+         GROUP BY DATE(received_at)
+         ORDER BY fecha DESC`;
+      } else if (isLuxometro) {
+        query = `SELECT 
+          DATE(received_at) as fecha,
+          COUNT(*) as total,
+          AVG(light) as avg_light,
+          MIN(light) as min_light,
+          MAX(light) as max_light,
+          AVG(white_light) as avg_white,
+          MIN(white_light) as min_white,
+          MAX(white_light) as max_white,
+          AVG(raw_light) as avg_raw,
+          MIN(raw_light) as min_raw,
+          MAX(raw_light) as max_raw
+         FROM ${table}
+         WHERE received_at >= NOW() - INTERVAL '7 days'
+         GROUP BY DATE(received_at)
+         ORDER BY fecha DESC`;
+      } else {
+        query = `SELECT 
+          DATE(received_at) as fecha,
+          COUNT(*) as total
+         FROM ${table}
+         WHERE received_at >= NOW() - INTERVAL '7 days'
+         GROUP BY DATE(received_at)
+         ORDER BY fecha DESC`;
+      }
+      
+      const stats = await pool.query(query);
+      
+      const dailyStats = stats.rows.map(day => {
+        const result = { fecha: day.fecha, total: day.total };
+        
+        if (isTemHumTable) {
+          result.temperatura = {
+            promedio: day.avg_temp,
+            minimo: day.min_temp,
+            maximo: day.max_temp
+          };
+          result.humedad = {
+            promedio: day.avg_humidity,
+            minimo: day.min_humidity,
+            maximo: day.max_humidity
+          };
+        } else if (isCalidadAgua) {
+          result.ph = {
+            promedio: day.avg_ph,
+            minimo: day.min_ph,
+            maximo: day.max_ph
+          };
+          result.ec = {
+            promedio: day.avg_ec,
+            minimo: day.min_ec,
+            maximo: day.max_ec
+          };
+          result.ppm = {
+            promedio: day.avg_ppm,
+            minimo: day.min_ppm,
+            maximo: day.max_ppm
+          };
+        } else if (isLuxometro) {
+          result.light = {
+            promedio: day.avg_light,
+            minimo: day.min_light,
+            maximo: day.max_light
+          };
+          result.white_light = {
+            promedio: day.avg_white,
+            minimo: day.min_white,
+            maximo: day.max_white
+          };
+          result.raw_light = {
+            promedio: day.avg_raw,
+            minimo: day.min_raw,
+            maximo: day.max_raw
+          };
+        }
+        
+        return result;
+      });
+      
+      res.json(dailyStats);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Endpoint: Último registro (con validación)
+app.get('/api/latest/:table',
+  validateTableParam,
+  cacheMiddleware('latest-record'),
+  async (req, res, next) => {
+    const { table } = req.params;
+    
+      try {
+        logger.info(`Querying latest record from table: ${table}`);
+        const startTime = Date.now();
+        logger.info(`Getting connection from pool for table ${table}`);
+        const client = await pool.connect();
+        logger.info(`Got connection from pool for table ${table}`);
+        try {
+          logger.info(`Starting database transaction for table ${table}`);
+        try {
+          await client.query('BEGIN');
+          
+          // Test simple query
+          const testQuery = await client.query({
+            text: `SELECT 1 FROM ${table} LIMIT 1`,
+            timeout: 5000
+          });
+          logger.info(`Test query succeeded for table ${table}`);
+          
+          // Full query
+          const result = await client.query({
+            text: `SELECT * FROM ${table} ORDER BY received_at DESC LIMIT 1`,
+            timeout: 5000
+          });
+          
+          await client.query('COMMIT');
+          logger.info(`Transaction committed for table ${table}`);
+          
+          const duration = Date.now() - startTime;
+          logger.info(`Query completed in ${duration}ms for ${table}`, {
+            rowCount: result.rowCount,
+            queryDuration: duration
+          });
+          
+          let data = result.rows[0] || null;
+          
+          // Calcular punto de rocío para sensores de humedad
+          if (data && (table === 'temhum1' || table === 'temhum2')) {
+            data.dew_point = calcDewPoint(data.temperatura, data.humedad);
+          }
+          
+          if (data && res.locals.cacheKey) {
+            await redisClient.set(res.locals.cacheKey, JSON.stringify(data), 'EX', res.locals.ttl);
+          }
+          
+          client.release();
+          res.json(data);
+          return;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          logger.error(`Transaction rolled back for table ${table}:`, err);
+          throw err;
+        }
+      } catch (queryErr) {
+        logger.error(`Database query failed for table ${table}:`, {
+          error: queryErr.message,
+          stack: queryErr.stack
+        });
+        throw queryErr;
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Health Check Mejorado
+app.get('/api/health', async (req, res) => {
+  const health = {
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    services: {}
+  };
+
+  try {
+    await pool.query('SELECT 1');
+    health.services.postgres = 'OK';
+    
+    // Verificar existencia y estructura de tablas
+    const requiredTables = ['luxometro', 'calidad_agua', 'temhum1', 'temhum2'];
+    const tablesInfo = {};
+    
+    for (const table of requiredTables) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT column_name, data_type 
+           FROM information_schema.columns 
+           WHERE table_name = $1`,
+          [table]
+        );
+        tablesInfo[table] = {
+          exists: rows.length > 0,
+          columns: rows
+        };
+      } catch (err) {
+        tablesInfo[table] = {
+          exists: false,
+          error: err.message
+        };
+      }
+    }
+    
+    health.tables = tablesInfo;
+    health.missing_tables = requiredTables.filter(t => !tablesInfo[t]?.exists);
+    
+  } catch (err) {
+    health.services.postgres = 'FAIL';
+    health.postgres_error = err.message;
+  }
+
+  try {
+    await redisClient.ping();
+    health.services.redis = 'OK';
+  } catch (err) {
+    health.services.redis = 'FAIL';
+    health.redis_error = err.message;
+  }
+
+  res.status(health.status === 'OK' ? 200 : 503).json(health);
+});
+
+// Middleware de errores profesional
 app.use((err, req, res, next) => {
-  console.error(`[${new Date().toISOString()}] Error en ${req.method} ${req.url}:`, err);
-  res.status(500).json({
-    error: 'Error interno del servidor',
-    message: err.message
+  const status = err.status || 500;
+  const message = err.message || 'Internal Server Error';
+  
+  logger.error(`${status} - ${message} - ${req.originalUrl} - ${req.method} - ${req.ip}`);
+  
+  res.status(status).json({
+    error: message,
+    path: req.originalUrl,
+    timestamp: new Date().toISOString()
   });
 });
 
-// ========== ENDPOINTS ==========
-
-// 1. Último registro de cada tabla
-app.get('/api/latest/:table', cacheMiddleware('latest-record'), async (req, res) => {
-  const { table } = req.params;
-  const validTables = ['luxometro', 'calidad_agua', 'temhum1', 'temhum2'];
-
-  if (!validTables.includes(table)) {
-    return res.status(400).json({ error: 'Tabla inválida' });
-  }
-
-  try {
-    const query = `SELECT * FROM ${table} ORDER BY received_at DESC LIMIT 1`;
-    const result = await pool.query(query);
-    const data = result.rows[0] || null;
-
-    if (data && res.locals.cacheKey) {
-      await redisClient.set(res.locals.cacheKey, JSON.stringify(data), 'EX', res.locals.ttl);
-    }
-
-    res.json(data);
-  } catch (err) {
-    throw new Error(`Error al obtener último registro: ${err.message}`);
-  }
-});
-
-// 2. Datos históricos con paginación
-app.get('/api/history/:table', cacheMiddleware('history-data', 60), async (req, res) => {
-  const { table } = req.params;
-  const { page = 1, limit = 100, from, to } = req.query;
-  const offset = (page - 1) * limit;
-
-  if (limit > 500) {
-    return res.status(400).json({ error: 'El límite máximo es 500' });
-  }
-
-  try {
-    let whereClause = '';
-    const params = [];
-
-    if (from || to) {
-      const conditions = [];
-      if (from) {
-        conditions.push(`received_at >= $${params.length + 1}`);
-        params.push(new Date(from));
-      }
-      if (to) {
-        conditions.push(`received_at <= $${params.length + 1}`);
-        params.push(new Date(to));
-      }
-      whereClause = `WHERE ${conditions.join(' AND ')}`;
-    }
-
-    const countQuery = `SELECT COUNT(*) FROM ${table} ${whereClause}`;
-    const countResult = await pool.query(countQuery, params);
-    const total = parseInt(countResult.rows[0].count, 10);
-
-    const dataQuery = `
-      SELECT * FROM ${table}
-      ${whereClause}
-      ORDER BY received_at DESC
-      LIMIT $${params.length + 1}
-      OFFSET $${params.length + 2}
-    `;
-    const dataParams = [...params, limit, offset];
-    const dataResult = await pool.query(dataQuery, dataParams);
-
-    const response = {
-      page: parseInt(page, 10),
-      limit: parseInt(limit, 10),
-      total,
-      totalPages: Math.ceil(total / limit),
-      data: dataResult.rows
-    };
-
-    if (res.locals.cacheKey) {
-      await redisClient.set(res.locals.cacheKey, JSON.stringify(response), 'EX', res.locals.ttl);
-    }
-
-    res.json(response);
-  } catch (err) {
-    throw new Error(`Error al obtener histórico: ${err.message}`);
-  }
-});
-
-// 3. Estadísticas diarias
-app.get('/api/stats/:table', cacheMiddleware('daily-stats', 300), async (req, res) => {
-  const { table } = req.params;
-  const { days = 7 } = req.query;
-
-  try {
-    const query = `
-      SELECT
-        DATE(received_at) AS date,
-        COUNT(*) AS records,
-        AVG(temperatura) AS avg_temperatura,
-        MIN(temperatura) AS min_temperatura,
-        MAX(temperatura) AS max_temperatura,
-        AVG(humedad) AS avg_humedad
-      FROM ${table}
-      WHERE received_at >= NOW() - INTERVAL '${days} days'
-      GROUP BY date
-      ORDER BY date DESC
-    `;
-
-    const result = await pool.query(query);
-    const response = {
-      days: parseInt(days, 10),
-      stats: result.rows
-    };
-
-    if (res.locals.cacheKey) {
-      await redisClient.set(res.locals.cacheKey, JSON.stringify(response), 'EX', res.locals.ttl);
-    }
-
-    res.json(response);
-  } catch (err) {
-    throw new Error(`Error al generar estadísticas: ${err.message}`);
-  }
-});
-
-// 4. Datos para gráfico por hora
-// 4. Datos para gráfico por hora (mejorado para calidad_agua)
-app.get('/api/chart/:table', cacheMiddleware('chart-data', 180), async (req, res) => {
-  const { table } = req.params;
-  const { hours = 24 } = req.query;
-
-  // Configuración dinámica por tabla
-  const tableConfigs = {
-    temhum1: {
-      fields: ['temperatura', 'humedad']
-    },
-    temhum2: {
-      fields: ['temperatura', 'humedad']
-    },
-    calidad_agua: {
-      fields: ['ec', 'ppm', 'ph']
-    },
-    luxometro: {
-      fields: ['lux']
-    }
-  };
-
-  if (!tableConfigs[table]) {
-    return res.status(400).json({ error: 'Tabla no soportada para gráficos' });
-  }
-
-  const selectedFields = tableConfigs[table].fields;
-
-  try {
-    const selectFields = selectedFields
-      .map(f => `AVG(${f}) AS avg_${f}`)
-      .join(', ');
-
-    const query = `
-      SELECT
-        DATE_TRUNC('hour', received_at) AS hour,
-        ${selectFields}
-      FROM ${table}
-      WHERE received_at >= NOW() - INTERVAL '${hours} hours'
-      GROUP BY hour
-      ORDER BY hour ASC
-    `;
-
-    const result = await pool.query(query);
-
-    const response = {
-      hours: parseInt(hours, 10),
-      data: result.rows.map(row => {
-        const entry = {
-          time: moment(row.hour).format('YYYY-MM-DD HH:mm')
-        };
-        selectedFields.forEach(f => {
-          entry[f] = row[`avg_${f}`];
-        });
-        return entry;
-      })
-    };
-
-    if (res.locals.cacheKey) {
-      await redisClient.set(res.locals.cacheKey, JSON.stringify(response), 'EX', res.locals.ttl);
-    }
-
-    res.json(response);
-  } catch (err) {
-    throw new Error(`Error al generar datos para gráficos: ${err.message}`);
-  }
-});
-
-
-// 5. Estado del sistema
-app.get('/api/system-status', async (req, res) => {
-  try {
-    const pgResult = await pool.query('SELECT NOW() AS db_time');
-    await redisClient.ping();
-
-    res.json({
-      status: 'OK',
-      postgres: {
-        connected: true,
-        time: pgResult.rows[0].db_time
-      },
-      redis: {
-        connected: true
-      },
-      uptime: process.uptime()
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: 'ERROR',
-      error: err.message
-    });
-  }
-});
-
-// Iniciar servidor
+// Iniciar servidor con manejo de cierre
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend escuchando en http://localhost:${PORT}`);
-  console.log('Endpoints disponibles:');
-  console.log(`  GET /api/latest/:table`);
-  console.log(`  GET /api/history/:table`);
-  console.log(`  GET /api/stats/:table`);
-  console.log(`  GET /api/chart/:table`);
-  console.log(`  GET /api/system-status`);
+const server = app.listen(PORT, () => {
+  logger.info(`🚀 Server running on port ${PORT}`);
 });
 
-module.exports = {
-  app,
-  pool,
-  redisClient,
-  calcDewPoint
-};
+// Manejo de cierre adecuado
+process.on('SIGTERM', () => {
+  server.close(() => {
+    pool.end();
+    redisClient.disconnect();
+    logger.info('Server terminated');
+    process.exit(0);
+  });
+});
+
+// Función de punto de rocío (mejorada)
+function calcDewPoint(temp, hum) {
+  if (temp == null || hum == null) return null;
+  
+  const a = 17.27;
+  const b = 237.7;
+  const alpha = (a * temp) / (b + temp) + Math.log(hum / 100);
+  return Number((b * alpha / (a - alpha)).toFixed(2));
+}
+
+module.exports = { app, pool, redisClient, calcDewPoint };

@@ -1,143 +1,251 @@
-# Backend para Sistema de Monitoreo IoT de Invernadero
+# Backend IoT para Invernadero
 
-Este proyecto es un backend desarrollado en Node.js con Express que permite monitorear y analizar datos de sensores de un invernadero inteligente. El sistema se conecta a una base de datos PostgreSQL para almacenar los datos y utiliza Redis para el almacenamiento en caché, mejorando el rendimiento de las consultas frecuentes.
+API para monitoreo de sensores en un invernadero inteligente, con almacenamiento en PostgreSQL y caché en Redis.
 
-## 🚀 Características Principales
+## Requisitos
 
-- **Monitoreo en Tiempo Real**: Obtén los últimos registros de los sensores del invernadero.
-- **Histórico de Datos**: Consulta datos históricos con paginación y filtros por fecha.
-- **Estadísticas Diarias**: Visualiza promedios, mínimos y máximos de las mediciones.
-- **Gráficos**: Endpoints optimizados para la generación de gráficos de tendencias.
-- **Caché Inteligente**: Implementa caché con Redis para mejorar el rendimiento.
-- **CORS Configurado**: Listo para integración con frontend en diferentes dominios.
+- Node.js 18+
+- PostgreSQL 14+
+- Redis 6+
+- npm 9+
 
-## 🛠️ Tecnologías Utilizadas
+## Instalación
 
-- **Node.js**: Entorno de ejecución de JavaScript
-- **Express**: Framework web para Node.js
-- **PostgreSQL**: Base de datos relacional para almacenamiento persistente
-- **Redis**: Almacenamiento en caché
-- **ioredis**: Cliente Redis para Node.js
-- **Moment.js**: Manejo de fechas y horas
-- **CORS**: Middleware para habilitar CORS
-
-## 📦 Estructura del Proyecto
-
-```
-.
-├── server.js           # Punto de entrada de la aplicación
-├── package.json        # Dependencias y scripts
-├── package-lock.json   # Versiones exactas de dependencias
-└── node_modules/       # Dependencias instaladas
-```
-
-## 🔌 Configuración
-
-1. **Variables de Entorno**: Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
-
-```env
-PG_URI=postgres://usuario:contraseña@host:puerto/base_de_datos?sslmode=disable
-REDIS_HOST=host_redis
-REDIS_PORT=puerto_redis
-REDIS_PASSWORD=contraseña_redis
-```
-
-2. **Instalación de Dependencias**:
-
+1. Clonar el repositorio
+2. Instalar dependencias:
 ```bash
 npm install
 ```
+3. Configurar variables de entorno (ver sección `.env`)
 
-3. **Ejecución**:
+## Configuración
 
+Crear archivo `.env` con las siguientes variables:
+
+```ini
+# Servidor
+PORT=4000
+
+# PostgreSQL
+PG_URI=postgres://user:password@host:port/database
+
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_USER=
+
+# CORS (separar múltiples orígenes con comas)
+CORS_ORIGINS=http://localhost:3000
+```
+
+## Uso
+
+- Iniciar servidor en producción:
 ```bash
-# Modo desarrollo
-npm run dev
-
-# Modo producción
 npm start
 ```
 
-## 📚 API Endpoints
-
-### 1. Obtener último registro
-```
-GET /api/latest/:table
-```
-**Parámetros:**
-- `table`: Nombre de la tabla (ej: 'temhum1', 'luxometro', 'calidad_agua')
-
-### 2. Obtener histórico
-```
-GET /api/history/:table
-```
-**Parámetros de consulta:**
-- `page`: Número de página (por defecto: 1)
-- `limit`: Registros por página (máx. 500, por defecto: 100)
-- `from`: Fecha de inicio (formato ISO)
-- `to`: Fecha de fin (formato ISO)
-
-### 3. Estadísticas diarias
-```
-GET /api/stats/:table
-```
-**Parámetros de consulta:**
-- `days`: Número de días hacia atrás (por defecto: 7)
-
-### 4. Datos para gráficos
-```
-GET /api/chart/:table
-```
-**Parámetros de consulta:**
-- `hours`: Horas hacia atrás (por defecto: 24)
-
-## 🔐 Seguridad
-
-- CORS configurado solo para dominios autorizados
-- Manejo de errores centralizado
-- Timeouts para conexiones a base de datos
-
-## 🧪 Pruebas
-
-El proyecto incluye pruebas unitarias con Jest. Para ejecutarlas:
-
+- Iniciar en modo desarrollo:
 ```bash
-# Ejecutar pruebas
-npm test
-
-# Ejecutar pruebas en modo watch
-npm run test:watch
-
-# Generar reporte de cobertura
-npm run coverage
+npm run dev
 ```
 
-## 📊 Estructura de la Base de Datos
+- Ejecutar tests:
+```bash
+npm test
+```
 
-El sistema espera las siguientes tablas:
+## Endpoints API
 
-1. **temhum1** y **temhum2**: Datos de temperatura y humedad
-2. **luxometro**: Datos de iluminación
-3. **calidad_agua**: Parámetros de calidad del agua
+### Consultas Temporales
 
-Cada tabla debe incluir al menos los siguientes campos:
-- `id`: Identificador único
-- `temperatura`: Temperatura en grados Celsius
-- `humedad`: Humedad relativa en porcentaje
-- `received_at`: Marca de tiempo de la medición
+Todos los endpoints soportan parámetros de rango temporal:
 
-## 🤝 Contribución
+- `?hours=N`: Últimas N horas (ej: ?hours=24)
+- `?days=N`: Últimos N días (ej: ?days=7)  
+- `?weeks=N`: Últimas N semanas (ej: ?weeks=4)
+- `?start=YYYY-MM-DD&end=YYYY-MM-DD`: Rango personalizado
 
-1. Haz un fork del proyecto
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Haz commit de tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Haz push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
+Ejemplos:
+- `/api/history/temhum1?hours=24` (datos horarios)
+- `/api/stats/temhum2?days=7` (promedios diarios)
+- `/api/history/calidad_agua?weeks=4` (datos semanales)
 
-## 📄 Licencia
+### `GET /api/latest/:table`
+Obtiene el último registro de una tabla de sensores.
 
-Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
+### `GET /api/history/:table`
+Obtiene los últimos 100 registros de una tabla, ordenados por fecha descendente.
 
-## ✉️ Contacto
+### `GET /api/stats/:table`
+Obtiene estadísticas diarias (promedio, mínimo, máximo) de los últimos 7 días.
 
-Para consultas o soporte, contacta al equipo de desarrollo.
+**Tablas disponibles:**
+- `temhum1` - Temperatura y humedad zona 1 (datos disponibles)
+- `temhum2` - Temperatura y humedad zona 2 (datos disponibles)
+- `calidad_agua` - Parámetros de calidad de agua (solo datos de pH)
+- `luxometro` - Datos de luminosidad (tabla vacía)
+
+**Ejemplo de respuesta para /api/latest:**
+```json
+{
+  "id": 123,
+  "temperatura": 22.5,
+  "humedad": 65,
+  "received_at": "2025-06-12T17:30:45.123Z",
+  "timestamp": 1734567845,
+  "dew_point": 15.8
+}
+```
+
+**Ejemplo de respuesta para /api/history:**
+```json
+[
+  {
+    "id": 43044,
+    "temperatura": 14.2,
+    "humedad": 78.8,
+    "dew_point": 10.6,
+    "received_at": "2025-06-12T18:20:28.135Z"
+  },
+  {
+    "id": 43043,
+    "temperatura": 14.1,
+    "humedad": 78.9,
+    "dew_point": 10.5,
+    "received_at": "2025-06-12T18:19:57.712Z"
+  }
+]
+```
+
+**Ejemplo de respuesta para /api/stats:**
+```json
+[
+  {
+    "fecha": "2025-06-12",
+    "total": 150,
+    "temperatura": {
+      "promedio": 14.5,
+      "minimo": 13.8,
+      "maximo": 15.2
+    },
+    "humedad": {
+      "promedio": 78.3,
+      "minimo": 76.5,
+      "maximo": 79.8
+    }
+  }
+]
+```
+
+### `GET /api/health`
+Verifica el estado del servicio y conexiones a bases de datos.
+
+**Respuesta:**
+```json
+{
+  "status": "OK",
+  "timestamp": "2025-06-12T17:32:10.456Z",
+  "services": {
+    "postgres": "OK",
+    "redis": "OK"
+  }
+}
+```
+
+## Diagrama de Arquitectura
+
+```mermaid
+graph TD
+    A[Sensores IoT] -->|Datos| B(API Backend)
+    B --> C[(PostgreSQL)]
+    B --> D[(Redis)]
+    C --> E[Visualización]
+    D --> E
+    E --> F[Usuario Final]
+```
+
+## Ejemplos de Visualización
+
+### Escala Horaria (últimas 24 horas)
+```mermaid
+xychart-beta
+    title "Temperatura Promedio Horaria (°C)"
+    x-axis "Hora" [00:00, 06:00, 12:00, 18:00]
+    y-axis "°C" 10-->25
+    line [12.5, 14.2, 19.8, 16.5]
+```
+
+### Escala Diaria (últimos 7 días)
+```mermaid
+xychart-beta
+    title "Humedad Promedio Diaria (%)"
+    x-axis "Día" ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+    y-axis "%" 60-->90
+    line [78.5, 82.1, 80.3, 75.6, 79.2, 83.4, 81.7]
+```
+
+### Escala Semanal (últimas 4 semanas)
+```mermaid
+xychart-beta
+    title "pH Promedio Semanal"
+    x-axis "Semana" ["1", "2", "3", "4"]
+    y-axis "pH" 6.5-->7.5
+    line [7.12, 7.05, 6.98, 7.08]
+```
+
+### Comparativo Multiescala
+```mermaid
+xychart-beta
+    title "Comparación de Escalas Temporales"
+    x-axis "Período" ["Horaria", "Diaria", "Semanal"]
+    y-axis "Valor" 0-->100
+    bar [65, 78, 82]
+    bar [72, 85, 79]
+```
+
+## Estructura Técnica
+
+- **Express.js** - Framework web
+- **PostgreSQL** - Almacenamiento persistente
+- **Redis** - Caché de respuestas
+- **Winston** - Logging estructurado
+- **Express-validator** - Validación de inputs
+- **CORS** - Manejo de políticas de origen cruzado
+
+## Dependencias Principales
+
+- `express`: Framework web
+- `pg`: Cliente PostgreSQL
+- `ioredis`: Cliente Redis
+- `winston`: Sistema de logging
+- `express-validator`: Validación de endpoints
+- `cors`: Middleware para CORS
+
+## Scripts de Prueba
+
+- `npm test`: Ejecuta tests unitarios
+- `npm run test:watch`: Ejecuta tests en modo watch
+- `npm run coverage`: Genera reporte de cobertura
+
+## Manejo de Errores
+
+La API devuelve errores en formato JSON con:
+- Código HTTP apropiado
+- Mensaje descriptivo
+- Timestamp
+- Path del request
+
+Ejemplo de error:
+```json
+{
+  "error": "Table not found",
+  "path": "/api/latest/invalid_table",
+  "timestamp": "2025-06-12T17:32:15.789Z"
+}
+```
+
+## Licencia
+
+MIT
