@@ -44,6 +44,8 @@ pool.on('error', (err) => logger.error(`PostgreSQL Pool Error: ${err.message}`))
 
 const app = express();
 
+const authRouter = require('./routes/auth');
+
 // CORS Config (mejorado para producción)
 const allowedOrigins = process.env.CORS_ORIGINS ? 
   process.env.CORS_ORIGINS.split(',').map(origin => origin.trim()) : 
@@ -86,6 +88,9 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json());
+
+// Montar rutas de autenticación
+app.use('/api/auth', authRouter);
 
 // Cache Middleware (con invalidación por escritura)
 const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {
