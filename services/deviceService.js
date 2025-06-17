@@ -342,4 +342,60 @@ module.exports = {
   deleteDevice,
   updateDeviceStatus,
   getDeviceConsumptionHistory,
+  setDeviceConfiguration,
 };
+
+async function setDeviceConfiguration(dbDeviceId, newConfig) {
+  logger.info(`Attempting to set configuration for device ID ${dbDeviceId}:`, newConfig);
+
+  const deviceIdInt = parseInt(dbDeviceId, 10);
+  if (isNaN(deviceIdInt) || deviceIdInt <= 0) {
+    const error = new Error('Invalid device database ID provided for setDeviceConfiguration.');
+    error.status = 400;
+    throw error;
+  }
+
+  if (typeof newConfig !== 'object' || newConfig === null) {
+    const error = new Error('Invalid newConfig provided; must be an object.');
+    error.status = 400;
+    throw error;
+  }
+
+  try {
+    const query = `
+      UPDATE devices
+      SET config = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *;
+    `;
+    const result = await pool.query(query, [newConfig, deviceIdInt]);
+
+    if (result.rows.length === 0) {
+      const error = new Error(`Device with database ID ${deviceIdInt} not found for config update.`);
+      error.status = 404;
+      throw error;
+    }
+
+    const updatedDevice = result.rows[0];
+    logger.info(`Configuration updated for device ${updatedDevice.name} (ID: ${deviceIdInt}). New config:`, updatedDevice.config);
+
+    // WebSocket Broadcast
+    if (app && app.locals && typeof app.locals.broadcastWebSocket === 'function') {
+      app.locals.broadcastWebSocket({
+        type: 'device_config_updated',
+        data: updatedDevice
+      });
+    } else {
+      logger.warn(`[WebSocket Broadcast Simulated/Skipped] Event: device_config_updated for device ID ${deviceIdInt}. broadcastWebSocket not available.`);
+    }
+
+    return updatedDevice;
+  } catch (err) {
+    logger.error(`Error in setDeviceConfiguration for device ID ${deviceIdInt}:`, err);
+    // Re-throw if it's a not-found or bad-request, otherwise could be a generic 500
+    if (err.status) throw err;
+    const error = new Error('Failed to set device configuration.');
+    error.status = 500; // Generic server error if not already set
+    throw error;
+  }
+}

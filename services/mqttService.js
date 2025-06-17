@@ -1,6 +1,9 @@
 const mqtt = require('mqtt');
-const pool = require('../config/db'); // Assuming db config is in ../config/db.js
-const logger = require('../config/logger'); // Assuming logger config is in ../config/logger.js
+const pool = require('../config/db');
+const logger = require('../config/logger');
+const redisClient = require('../config/redis'); // Import Redis client
+
+const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH, 10) || 100; // Max N readings
 
 // Environment variables for MQTT connection (ensure these are set in your .env file)
 // MQTT_BROKER_URL: Full URL to your MQTT broker (e.g., mqtt://your_broker.com:1883 or ws://your_broker.com:8083/mqtt for WebSocket)
@@ -93,6 +96,39 @@ const handleIncomingMessage = async (topic, message) => {
         data.stats.tmin, data.stats.tmax, data.stats.tavg, data.stats.hmin, data.stats.hmax, data.stats.havg,
         data.stats.total, data.stats.errors, receivedAt
       ];
+
+      // Update Redis cache for TemHum sensor
+      try {
+        const sensorKey = `sensor_latest:${tableName}`; // e.g., sensor_latest:temhum1
+        await redisClient.hmset(sensorKey,
+          'temperatura', data.temperatura,
+          'humedad', data.humedad,
+          'heatindex', data.heatindex,
+          'dewpoint', data.dewpoint,
+          'rssi', data.rssi,
+          'last_updated', receivedAt.toISOString()
+        );
+        logger.info(`Updated Redis cache for ${sensorKey}`);
+
+        // Add to Redis List for history (temperatura)
+        const tempListKey = `sensor_history:${tableName}:temperatura`;
+        const tempDataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data.temperatura });
+        redisClient.multi().lpush(tempListKey, tempDataPoint).ltrim(tempListKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec().catch(err => {
+            logger.error(`Failed to update Redis list for ${tempListKey}:`, err);
+        });
+
+        // Add to Redis List for history (humedad)
+        const humListKey = `sensor_history:${tableName}:humedad`;
+        const humDataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data.humedad });
+        redisClient.multi().lpush(humListKey, humDataPoint).ltrim(humListKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec().catch(err => {
+            logger.error(`Failed to update Redis list for ${humListKey}:`, err);
+        });
+        // Add other TemHum fields to lists if needed (e.g. heatindex, dewpoint, rssi)
+
+      } catch (redisError) {
+        logger.error(`Failed to update Redis cache for ${tableName}:`, redisError);
+      }
+
     } else if (idOrGroup === 'Agua') {
       tableName = 'calidad_agua';
       if (dataType === 'data') {
@@ -108,8 +144,38 @@ const handleIncomingMessage = async (topic, message) => {
           return;
         }
         query = `INSERT INTO ${tableName} (ph, ec, ppm, temperatura_agua, received_at) VALUES ($1, $2, $3, $4, $5)`;
-        // Assuming 'temperatura_agua' might also come in this payload, or be null
         values = [data.ph, data.ec, data.ppm, data.temperatura_agua || null, receivedAt];
+
+        // Update Redis cache for Agua/data
+        try {
+          const sensorKey = `sensor_latest:calidad_agua`;
+          await redisClient.hmset(sensorKey,
+            'ph', data.ph,
+            'ec', data.ec,
+            'ppm', data.ppm,
+            // If data.temperatura_agua is present in this payload, cache it too.
+            ...(data.temperatura_agua !== undefined && { 'temperatura_agua': data.temperatura_agua }),
+            'last_updated_multiparam', receivedAt.toISOString()
+          );
+          logger.info(`Updated Redis cache for ${sensorKey} (multi-param)`);
+
+          // Add to Redis Lists for history (pH, EC, PPM)
+          const paramsToLog = ['ph', 'ec', 'ppm'];
+          if (data.temperatura_agua !== undefined) paramsToLog.push('temperatura_agua');
+
+          for (const param of paramsToLog) {
+              if (data[param] !== undefined) {
+                  const listKey = `sensor_history:calidad_agua:${param}`;
+                  const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data[param] });
+                  redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec().catch(err => {
+                      logger.error(`Failed to update Redis list for ${listKey}:`, err);
+                  });
+              }
+          }
+        } catch (redisError) {
+          logger.error(`Failed to update Redis cache for ${sensorKey} (multi-param):`, redisError);
+        }
+
       } else if (dataType === 'Temperatura') {
         const waterTemp = parseFloat(message.toString());
         if (isNaN(waterTemp)) {
@@ -118,6 +184,27 @@ const handleIncomingMessage = async (topic, message) => {
         }
         query = `INSERT INTO ${tableName} (temperatura_agua, received_at) VALUES ($1, $2)`;
         values = [waterTemp, receivedAt];
+
+        // Update Redis cache for Agua/Temperatura
+        try {
+          const sensorKey = `sensor_latest:calidad_agua`;
+          await redisClient.hmset(sensorKey,
+            'temperatura_agua', waterTemp,
+            'last_updated_temp_agua', receivedAt.toISOString()
+          );
+          logger.info(`Updated Redis cache for ${sensorKey} (temp_agua)`);
+
+          // Add to Redis List for history (temperatura_agua)
+          const tempListKey = `sensor_history:calidad_agua:temperatura_agua`;
+          const tempDataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: waterTemp });
+          redisClient.multi().lpush(tempListKey, tempDataPoint).ltrim(tempListKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec().catch(err => {
+              logger.error(`Failed to update Redis list for ${tempListKey}:`, err);
+          });
+
+        } catch (redisError) {
+          logger.error(`Failed to update Redis cache for ${sensorKey} (temp_agua):`, redisError);
+        }
+
       } else {
         logger.warn(`Unknown dataType '${dataType}' for group 'Agua' on topic: ${topic}`);
         return;
@@ -169,6 +256,35 @@ const handleIncomingMessage = async (topic, message) => {
               data.sensor_timestamp || null,
               receivedAt
           ];
+
+          // Update Redis cache for PowerSensor
+          try {
+            const sensorKey = `sensor_latest:power:${powerSensorHardwareId}`;
+            await redisClient.hmset(sensorKey,
+              'voltage', data.voltage,
+              'current', data.current,
+              'power', data.power,
+              ...(data.sensor_timestamp && { 'sensor_timestamp': data.sensor_timestamp }), // Cache if present
+              'last_updated', receivedAt.toISOString()
+            );
+            logger.info(`Updated Redis cache for ${sensorKey}`);
+
+            // Add to Redis Lists for history (voltage, current, power)
+            const metricsToLog = ['voltage', 'current', 'power'];
+            for (const metric of metricsToLog) {
+                if (data[metric] !== undefined) {
+                    const listKey = `sensor_history:power:${powerSensorHardwareId}:${metric}`;
+                    const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data[metric] });
+                    redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec().catch(err => {
+                        logger.error(`Failed to update Redis list for ${listKey}:`, err);
+                    });
+                }
+            }
+
+          } catch (redisError) {
+            logger.error(`Failed to update Redis cache for power sensor ${powerSensorHardwareId}:`, redisError);
+          }
+
       } catch (dbSubQueryError) {
           logger.error(`Error processing power sensor data for ${powerSensorHardwareId}: ${dbSubQueryError.message}`, { errorStack: dbSubQueryError.stack });
           return;

@@ -7,6 +7,11 @@ const moment = require('moment');
 const winston = require('winston');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 const WebSocket = require('ws'); // Require WebSocket library
+const { startScheduler, stopScheduler } = require('./services/schedulerEngineService'); // Import scheduler functions
+const { startRulesEngine, stopRulesEngine } = require('./services/rulesEngineService'); // Import rules engine functions
+const { startWorker: startCriticalActionWorker, stopWorker: stopCriticalActionWorker } = require('./workers/criticalActionWorker'); // Import worker
+const url = require('url'); // For parsing URL query parameters
+const jwt = require('jsonwebtoken'); // For JWT verification
 
 // Configuración de logger
 const logger = winston.createLogger({
@@ -466,31 +471,69 @@ const wss = new WebSocket.Server({ server });
 app.locals.wss = wss; // Make wss available in app.locals for shutdown and broadcasting
 
 wss.on('connection', (ws, req) => {
-  const clientIp = req.socket.remoteAddress; // Or req.headers['x-forwarded-for'] if behind a proxy
-  logger.info(`WebSocket client connected: ${clientIp}`);
+  const clientIp = req.socket.remoteAddress || req.headers['x-forwarded-for'];
+  logger.info(`WebSocket: Connection attempt from ${clientIp}. Path: ${req.url}`);
 
-  ws.on('message', (message) => {
-    // Attempt to parse message as JSON
-    try {
-      const parsedMessage = JSON.parse(message);
-      logger.info(`Received WebSocket message from ${clientIp}:`, parsedMessage);
-      // Example: Echo message back or handle specific message types
-      // ws.send(JSON.stringify({ type: 'echo', payload: parsedMessage }));
-    } catch (e) {
-      logger.info(`Received WebSocket message (non-JSON) from ${clientIp}: ${message}`);
-      // ws.send(`Received non-JSON message: ${message}`);
-    }
-  });
+  // Parse token from query parameter
+  let token;
+  try {
+    const parsedUrl = url.parse(req.url, true); // true to parse query string
+    token = parsedUrl.query.token;
+  } catch (e) {
+    logger.error(`WebSocket: Error parsing connection URL for token from ${clientIp}:`, e);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: 'Invalid connection request.' }));
+    ws.terminate();
+    return;
+  }
 
-  ws.on('close', (code, reason) => {
-    logger.info(`WebSocket client disconnected: ${clientIp} (Code: ${code}, Reason: ${reason || 'No reason given'})`);
-  });
+  if (!token) {
+    logger.warn(`WebSocket: Connection attempt from ${clientIp} without token. Terminating.`);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: 'Authentication token required.' }));
+    ws.terminate();
+    return;
+  }
 
-  ws.on('error', (error) => {
-    logger.error(`WebSocket error for client ${clientIp}:`, error);
-  });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'supersecret');
+    ws.user = { id: decoded.id, username: decoded.username, role: decoded.role }; // Attach user to ws object
 
-  ws.send(JSON.stringify({ type: 'info', message: 'WebSocket connection established successfully.' }));
+    logger.info(`WebSocket: Client authenticated and connected: User ${ws.user.username} (ID: ${ws.user.id}, Role: ${ws.user.role}) from ${clientIp}`);
+
+    // Original connection logic (welcome message, event handlers)
+    ws.on('message', (message) => {
+      try {
+        const parsedMessage = JSON.parse(message); // Assume clients send JSON
+        logger.info(`WebSocket: Received message from ${ws.user.username}: %j`, parsedMessage);
+        // TODO: Handle authenticated client messages if any specific actions are needed
+        // e.g., client pings, subscriptions to specific event types from this user
+        // Example: ws.send(JSON.stringify({ type: 'ack', original_payload: parsedMessage }));
+      } catch (e) {
+        // Handle non-JSON messages or messages with parsing errors
+        if (message instanceof Buffer) {
+            const rawMessage = message.toString();
+            logger.warn(`WebSocket: Received non-JSON binary/text message from ${ws.user.username}: ${rawMessage.substring(0,100)}...`);
+        } else {
+            logger.warn(`WebSocket: Received non-JSON message from ${ws.user.username}: ${message}`);
+        }
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      const reasonText = reason instanceof Buffer ? reason.toString() : reason;
+      logger.info(`WebSocket: Client disconnected: User ${ws.user?.username || 'Unknown (pre-auth or error)'} (ID: ${ws.user?.id}). Code: ${code}, Reason: ${reasonText || 'No reason given'}`);
+    });
+
+    ws.on('error', (error) => {
+      logger.error(`WebSocket: Error for user ${ws.user?.username || 'Unknown'}:`, error);
+    });
+
+    ws.send(JSON.stringify({ type: 'info', event: 'connection_success', message: 'WebSocket connection established and authenticated.' }));
+
+  } catch (error) {
+    logger.warn(`WebSocket: Invalid token for ${clientIp}. Connection terminated. Error: ${error.message}`);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: `Authentication failed: ${error.message}` }));
+    ws.terminate();
+  }
 });
 
 app.locals.broadcastWebSocket = (messageObject) => {
@@ -513,35 +556,86 @@ app.locals.broadcastWebSocket = (messageObject) => {
 
 logger.info('✅ WebSocket server initialized and attached to HTTP server.');
 
+// Start the scheduler engine
+startScheduler();
+
+// Start the rules engine
+startRulesEngine();
+
+// Start the Critical Action Worker
+if (app.locals.broadcastWebSocket) {
+  startCriticalActionWorker(app.locals.broadcastWebSocket);
+} else {
+  logger.error("CriticalActionWorker cannot start with broadcast capability: app.locals.broadcastWebSocket is not defined.");
+  // Decide if worker should start without broadcast, or if this is a fatal error
+  // For now, let's start it without, but log heavily.
+  logger.warn("Starting CriticalActionWorker WITHOUT WebSocket broadcast capability.");
+  startCriticalActionWorker();
+}
+
 // Manejo de cierre adecuado
 process.on('SIGTERM', () => {
-  logger.info('SIGTERM signal received: closing HTTP server.');
-  server.close(() => {
+  logger.info('SIGTERM signal received: closing HTTP server and other services.');
+
+  // Stop background workers and engines first
+  if (typeof stopCriticalActionWorker === 'function') {
+    stopCriticalActionWorker(); // This needs to be async or allow a callback if it involves async ops
+  }
+  if (typeof stopRulesEngine === 'function') {
+    stopRulesEngine();
+  }
+  if (typeof stopScheduler === 'function') {
+    stopScheduler();
+  }
+  // A small delay to allow async stop functions to initiate
+  // This is a simplified approach. A more robust way involves promises or callbacks.
+  setTimeout(() => {
+    server.close(() => {
     logger.info('HTTP server closed.');
-    pool.end(() => logger.info('PostgreSQL pool ended.'));
-    redisClient.disconnect(); // Assumes this logs its own completion or is quick
+
+    // Disconnect other services
     if (typeof disconnectMqtt === 'function') {
-        disconnectMqtt(); // Assumes this logs its own completion or is quick
+        disconnectMqtt();
+    }
+    if (redisClient && typeof redisClient.disconnect === 'function') {
+        redisClient.disconnect();
+        logger.info('Redis client disconnected.');
+    }
+    if (pool && typeof pool.end === 'function') {
+        pool.end(() => logger.info('PostgreSQL pool ended.'));
     }
 
+    // Close WebSocket server
     if (app.locals.wss) {
       logger.info('Closing WebSocket server...');
+      const wsTimeout = setTimeout(() => { // Give WS a chance to close gracefully
+        logger.warn('WebSocket server close timed out. Forcing client termination.');
+        if (app.locals.wss && app.locals.wss.clients) {
+            app.locals.wss.clients.forEach(client => client.terminate());
+        }
+        logger.info('All services attempted to close. Exiting process with error code due to timeout.');
+        process.exit(1);
+      }, 5000); // 5 seconds timeout for WS to close
+
       app.locals.wss.close(() => {
+        clearTimeout(wsTimeout); // Clear the timeout if wss closes gracefully
         logger.info('WebSocket server closed.');
         logger.info('All services closed. Exiting process.');
         process.exit(0);
       });
-      // Force close remaining WS connections after a timeout if wss.close() hangs
-      setTimeout(() => {
-        logger.warn('WebSocket server close timed out. Forcing client termination.');
-        app.locals.wss.clients.forEach(client => client.terminate());
-        process.exit(1); // Exit with error code if shutdown hangs
-      }, 5000); // 5 seconds timeout
     } else {
       logger.info('All services closed (WebSocket server not initialized). Exiting process.');
       process.exit(0);
     }
   });
+
+  // Fallback timeout for the entire SIGTERM handler
+  setTimeout(() => {
+    logger.error('Graceful shutdown timed out. Forcing exit.');
+    process.exit(1);
+  }, 15000); // Increased overall timeout slightly for more services
+});
+  }, 500); // Delay for worker/engine stop functions to start
 });
 
 // Función de punto de rocío (mejorada)

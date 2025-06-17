@@ -1,37 +1,70 @@
 const pool = require('../config/db');
 const logger = require('../config/logger');
-// const cronParser = require('cron-parser'); // Would be needed for full cron next_execution_at calculation
+const cronParser = require('cron-parser');
 
-// Helper function to calculate next_execution_at (simplified)
-function calculateNextExecutionTime(data, isEnabled = true) {
+// Helper function to calculate next_execution_at
+function calculateNextExecutionTime(scheduleData, isEnabled = true, forRuleName = 'schedule') {
   let nextExecutionAt = null;
-  if (isEnabled) {
-    if (data.execute_at) {
-      const executeAtDate = new Date(data.execute_at);
-      if (!isNaN(executeAtDate)) {
-          nextExecutionAt = executeAtDate;
-      } else {
-          logger.warn(`Invalid execute_at date format: ${data.execute_at}`);
-          // Potentially throw an error or handle as invalid input
+  if (!isEnabled) {
+    return null; // Disabled schedules have no next execution time
+  }
+
+  // Prefer execute_at if it's a valid future date, as it's more explicit for a one-time run or first run of a cron.
+  if (scheduleData.execute_at) {
+    const executeAtDate = new Date(scheduleData.execute_at);
+    if (!isNaN(executeAtDate) && executeAtDate > new Date()) {
+      nextExecutionAt = executeAtDate;
+      logger.debug(`Scheduler(${forRuleName}): Using execute_at for next_execution_at: ${nextExecutionAt}`);
+    } else {
+      logger.warn(`Scheduler(${forRuleName}): Invalid or past execute_at date: ${scheduleData.execute_at}. It will be ignored for next_execution_at calculation unless it's the only timing mechanism.`);
+      if (!scheduleData.cron_expression) { // If only execute_at was provided and it's bad
+          return null; // Cannot determine a valid future time
       }
     }
-    // Full cron parsing would go here if library was available and integrated
-    // For now, if cron_expression is present, we log and rely on execute_at or leave null
-    if (data.cron_expression) {
-      logger.warn(`Cron expression '${data.cron_expression}' present. Advanced calculation of next_execution_at from cron is not yet implemented. Next_execution_at will be based on execute_at if provided, otherwise null.`);
-      // Example of how it might work with a library:
-      // try {
-      //   if (!nextExecutionAt || data.execute_at === undefined) { // If execute_at isn't setting it or not present
-      //     const interval = cronParser.parseExpression(data.cron_expression);
-      //     nextExecutionAt = interval.next().toDate();
-      //   }
-      // } catch (err) {
-      //   logger.error(`Invalid cron expression '${data.cron_expression}': ${err.message}`);
-      //   // Decide: throw error, or set nextExecutionAt to null and log?
-      //   // For now, if execute_at is not there, it remains null.
-      // }
+  }
+
+  // If cron_expression is present, calculate next time from it.
+  // If execute_at was also present and valid, cron will take over after that initial execute_at time.
+  // If execute_at was in the past, cron should calculate from now.
+  if (scheduleData.cron_expression) {
+    try {
+      // Determine base date for cron calculation:
+      // If nextExecutionAt is already set by a valid future execute_at, calculate cron from that point.
+      // Otherwise, calculate from now.
+      const cronStartDate = (nextExecutionAt && nextExecutionAt > new Date()) ? nextExecutionAt : new Date();
+      const options = { currentDate: cronStartDate, tz: 'Etc/UTC' }; // Ensure timezone consistency
+      const interval = cronParser.parseExpression(scheduleData.cron_expression, options);
+
+      // If execute_at was used and is the *exact* next cron time, interval.next() would give the one *after*.
+      // So, if nextExecutionAt (from execute_at) is valid and matches cron's current/next, use it.
+      // Otherwise, get the next one from cron. This logic can get complex if execute_at is meant to override the cron's schedule temporarily.
+      // For simplicity: if execute_at is valid and in future, it's the next_execution_at.
+      // If cron is also present, subsequent runs will be based on cron.
+      // If execute_at is NOT valid/future, OR if it is valid but the user *only* wants cron logic for the *first* run:
+      if (!nextExecutionAt) { // Only calculate from cron if execute_at didn't yield a valid future time
+        nextExecutionAt = interval.next().toDate();
+        logger.debug(`Scheduler(${forRuleName}): Calculated next_execution_at from cron: ${nextExecutionAt}`);
+      } else {
+         logger.debug(`Scheduler(${forRuleName}): execute_at is set to ${nextExecutionAt}, cron ('${scheduleData.cron_expression}') will determine subsequent runs.`);
+      }
+    } catch (err) {
+      logger.error(`Scheduler(${forRuleName}): Invalid cron expression '${scheduleData.cron_expression}': ${err.message}.`);
+      // If cron is invalid and there was no valid future execute_at, no next execution can be determined.
+      if (!nextExecutionAt) return null;
+      // If execute_at was valid, we might proceed with that, but log cron error.
+      // For now, if cron is bad, and execute_at was also bad/past, this schedule won't run.
     }
   }
+
+  // Final check: ensure the calculated time is in the future if any time was derived.
+  if (nextExecutionAt && nextExecutionAt <= new Date()) {
+      logger.warn(`Scheduler(${forRuleName}): Calculated next_execution_at ${nextExecutionAt} is in the past. This schedule may not run as expected unless cron string is for very frequent tasks. Check schedule timing and server time.`);
+      // Depending on strictness, could return null here if it's not a cron job that would immediately re-calculate.
+      // If it IS a cron job, this past date might be okay if the cron interval is very short and it's about to tick over.
+      // For safety with one-time execute_at, if it's past, it means it was missed.
+      if (!scheduleData.cron_expression) return null;
+  }
+
   return nextExecutionAt;
 }
 
@@ -57,7 +90,37 @@ async function createScheduledOperation(scheduleData) {
   }
 
 
-  const next_execution_at = calculateNextExecutionTime({ execute_at, cron_expression }, is_enabled);
+  const next_execution_at = calculateNextExecutionTime(scheduleData, is_enabled, `create ${scheduleData.name || 'new_schedule'}`);
+
+  if (is_enabled && !next_execution_at && (cron_expression || execute_at)) {
+      const error = new Error('Failed to calculate a valid future execution time for the enabled schedule. Please check cron_expression or execute_at.');
+      error.status = 400;
+      logger.warn(error.message, { scheduleData });
+      throw error;
+  }
+
+  // Conflict Detection
+  if (is_enabled && next_execution_at) {
+    try {
+      const conflictCheckQuery = `
+        SELECT id FROM scheduled_operations
+        WHERE device_id = $1
+          AND is_enabled = TRUE
+          AND next_execution_at = $2;
+      `;
+      const conflictResult = await pool.query(conflictCheckQuery, [device_id, next_execution_at]);
+      if (conflictResult.rows.length > 0) {
+        const conflictError = new Error(`A conflicting schedule (ID: ${conflictResult.rows[0].id}) already exists for this device at the exact same execution time (${next_execution_at.toISOString()}).`);
+        conflictError.status = 409; // Conflict
+        logger.warn(conflictError.message, { device_id, next_execution_at });
+        throw conflictError;
+      }
+    } catch (conflictDbError) {
+      // If the conflict check itself errors, pass it up, but log it as a server-side issue potentially
+      logger.error('Error during schedule conflict check:', { errorMessage: conflictDbError.message, device_id, next_execution_at });
+      throw conflictDbError; // Or a generic error
+    }
+  }
 
   try {
     const query = `
@@ -158,48 +221,76 @@ async function updateScheduledOperation(id, updateData) {
   const values = [];
   let paramCount = 1;
 
-  // Fetch current schedule to compare for next_execution_at logic
-  const currentSchedule = await getScheduledOperationById(id); // This will throw 404 if not found
+  // Fetch current schedule to get existing values for comparison and merging
+  const currentSchedule = await getScheduledOperationById(id);
 
-  if (device_id !== undefined) { fields.push(`device_id = $${paramCount++}`); values.push(device_id); }
-  if (action_name !== undefined) { fields.push(`action_name = $${paramCount++}`); values.push(action_name); }
-  if (action_params !== undefined) { fields.push(`action_params = $${paramCount++}`); values.push(action_params || {}); }
-  if (cron_expression !== undefined) { fields.push(`cron_expression = $${paramCount++}`); values.push(cron_expression); }
-  if (execute_at !== undefined) { fields.push(`execute_at = $${paramCount++}`); values.push(execute_at ? new Date(execute_at) : null); }
-  if (is_enabled !== undefined) { fields.push(`is_enabled = $${paramCount++}`); values.push(is_enabled); }
-  if (description !== undefined) { fields.push(`description = $${paramCount++}`); values.push(description); }
+  // Construct the state of the schedule as it would be after the update
+  const updatedScheduleState = {
+    device_id: device_id !== undefined ? device_id : currentSchedule.device_id,
+    action_name: action_name !== undefined ? action_name : currentSchedule.action_name,
+    action_params: action_params !== undefined ? (action_params || {}) : currentSchedule.action_params,
+    cron_expression: cron_expression !== undefined ? (cron_expression || null) : currentSchedule.cron_expression,
+    execute_at: execute_at !== undefined ? (execute_at ? new Date(execute_at) : null) : currentSchedule.execute_at,
+    is_enabled: is_enabled !== undefined ? is_enabled : currentSchedule.is_enabled,
+    description: description !== undefined ? (description || null) : currentSchedule.description,
+  };
 
-  // Determine if timing-related fields or is_enabled have changed
-  const currentIsEnabled = currentSchedule.is_enabled;
-  const newIsEnabled = (is_enabled === undefined) ? currentIsEnabled : is_enabled;
+  if (device_id !== undefined) { fields.push(`device_id = $${paramCount++}`); values.push(updatedScheduleState.device_id); }
+  if (action_name !== undefined) { fields.push(`action_name = $${paramCount++}`); values.push(updatedScheduleState.action_name); }
+  if (action_params !== undefined) { fields.push(`action_params = $${paramCount++}`); values.push(updatedScheduleState.action_params); }
+  if (cron_expression !== undefined) { fields.push(`cron_expression = $${paramCount++}`); values.push(updatedScheduleState.cron_expression); }
+  if (execute_at !== undefined) { fields.push(`execute_at = $${paramCount++}`); values.push(updatedScheduleState.execute_at); }
+  if (is_enabled !== undefined) { fields.push(`is_enabled = $${paramCount++}`); values.push(updatedScheduleState.is_enabled); }
+  if (description !== undefined) { fields.push(`description = $${paramCount++}`); values.push(updatedScheduleState.description); }
 
-  const currentExecuteAt = currentSchedule.execute_at ? new Date(currentSchedule.execute_at).toISOString() : null;
-  const newExecuteAt = execute_at ? new Date(execute_at).toISOString() : currentExecuteAt;
+  // Recalculate next_execution_at based on the potentially updated fields
+  // This needs to happen regardless of whether timing fields were *explicitly* in updateData,
+  // because is_enabled change alone requires recalculation.
+  const potentialNextExecutionAt = calculateNextExecutionTime(updatedScheduleState, updatedScheduleState.is_enabled, `update ${id}`);
 
-  const currentCron = currentSchedule.cron_expression;
-  const newCron = cron_expression === undefined ? currentCron : cron_expression;
-
-  let next_execution_at;
-  if (is_enabled !== undefined || execute_at !== undefined || cron_expression !== undefined) {
-      // If any relevant field is explicitly in updateData, recalculate.
-      // Use values from updateData if present, else from currentSchedule for calculation.
-      const calcData = {
-          execute_at: execute_at !== undefined ? updateData.execute_at : currentSchedule.execute_at,
-          cron_expression: cron_expression !== undefined ? updateData.cron_expression : currentSchedule.cron_expression
-      };
-      next_execution_at = calculateNextExecutionTime(calcData, newIsEnabled);
+  // Always update next_execution_at field if it changed or if is_enabled changed.
+  // If calculateNextExecutionTime returns null, it means it should be null (e.g. disabled, or invalid time)
+  // We should compare with the current next_execution_at on the object if it exists
+  const currentNextExecutionAt = currentSchedule.next_execution_at ? new Date(currentSchedule.next_execution_at) : null;
+  if ((potentialNextExecutionAt ? potentialNextExecutionAt.toISOString() : null) !== (currentNextExecutionAt ? currentNextExecutionAt.toISOString() : null) ||
+      (is_enabled !== undefined && is_enabled !== currentSchedule.is_enabled)) {
       fields.push(`next_execution_at = $${paramCount++}`);
-      values.push(next_execution_at);
+      values.push(potentialNextExecutionAt);
   }
 
 
-  if (fields.length === 0) {
+  if (fields.length === 0) { // No actual changes being made
     const error = new Error('No fields provided for update.');
     error.status = 400; throw error;
   }
 
-  values.push(id); // For WHERE id = $N
+  values.push(id);
   const query = `UPDATE scheduled_operations SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${paramCount} RETURNING *;`;
+
+  // Conflict Detection for Update
+  if (updatedScheduleState.is_enabled && potentialNextExecutionAt) {
+    try {
+      const conflictCheckQuery = `
+        SELECT id FROM scheduled_operations
+        WHERE device_id = $1
+          AND is_enabled = TRUE
+          AND next_execution_at = $2
+          AND id != $3;
+      `;
+      const conflictResult = await pool.query(conflictCheckQuery, [updatedScheduleState.device_id, potentialNextExecutionAt, id]);
+      if (conflictResult.rows.length > 0) {
+        const conflictError = new Error(`Updating this schedule would cause a conflict with schedule ID ${conflictResult.rows[0].id} for device ID ${updatedScheduleState.device_id} at the same execution time (${potentialNextExecutionAt.toISOString()}).`);
+        conflictError.status = 409; // Conflict
+        logger.warn(conflictError.message);
+        throw conflictError;
+      }
+    } catch (conflictDbError) {
+      if (conflictDbError.status === 409) throw conflictDbError; // Re-throw specific conflict error
+      logger.error('Error during schedule conflict check on update:', { errorMessage: conflictDbError.message, device_id: updatedScheduleState.device_id, potentialNextExecutionAt });
+      throw conflictDbError; // Or a generic error
+    }
+  }
+
 
   try {
     const result = await pool.query(query, values);

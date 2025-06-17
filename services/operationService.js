@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const logger = require('../config/logger');
+const { app } = require('../server'); // Import app to access app.locals for WebSocket broadcasting
 
 async function recordOperation({
   userId,
@@ -36,8 +37,24 @@ async function recordOperation({
       details || {}
     ];
     const result = await pool.query(query, values);
-    logger.info(`Operation recorded: ${serviceName} - ${action} (Log ID: ${result.rows[0].id}, Status: ${status})`);
-    return result.rows[0];
+    const newOperationLog = result.rows[0];
+    logger.info(`Operation recorded: ${serviceName} - ${action} (Log ID: ${newOperationLog.id}, Status: ${status})`);
+
+    if (app && app.locals && typeof app.locals.broadcastWebSocket === 'function') {
+      try {
+        app.locals.broadcastWebSocket({
+          type: 'operation_recorded',
+          data: newOperationLog
+        });
+        logger.info(`WebSocket broadcast sent for operation_recorded: Log ID ${newOperationLog.id}`);
+      } catch (broadcastError) {
+        logger.error('Failed to broadcast WebSocket message for operation_recorded:', broadcastError);
+      }
+    } else {
+      logger.warn('[WebSocket Broadcast Simulated/Skipped] Event: operation_recorded. broadcastWebSocket not available.', { data: newOperationLog });
+      // TODO: Ensure broadcastWebSocket is properly accessible if this warning appears.
+    }
+    return newOperationLog;
   } catch (err) {
     logger.error('Error in recordOperation:', {
         errorMessage: err.message,
