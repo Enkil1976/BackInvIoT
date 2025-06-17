@@ -5,6 +5,7 @@ const Redis = require('ioredis');
 const cors = require('cors');
 const moment = require('moment');
 const winston = require('winston');
+const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 
 // Configuración de logger
 const logger = winston.createLogger({
@@ -41,6 +42,9 @@ pool.query('SELECT 1')
   .catch(err => logger.error('PostgreSQL connection error:', err));
 
 pool.on('error', (err) => logger.error(`PostgreSQL Pool Error: ${err.message}`));
+
+// Initialize and connect MQTT client
+connectMqtt();
 
 const app = express();
 
@@ -453,6 +457,7 @@ process.on('SIGTERM', () => {
   server.close(() => {
     pool.end();
     redisClient.disconnect();
+    disconnectMqtt();
     logger.info('Server terminated');
     process.exit(0);
   });

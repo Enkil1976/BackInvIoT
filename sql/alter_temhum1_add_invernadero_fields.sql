@@ -1,0 +1,15 @@
+-- Add new columns to temhum1 for Invernadero data structure
+ALTER TABLE temhum1
+    ADD COLUMN IF NOT EXISTS heatindex REAL,
+    ADD COLUMN IF NOT EXISTS dewpoint REAL,
+    ADD COLUMN IF NOT EXISTS rssi INTEGER,
+    ADD COLUMN IF NOT EXISTS boot INTEGER,
+    ADD COLUMN IF NOT EXISTS mem INTEGER,
+    ADD COLUMN IF NOT EXISTS stats_tmin REAL,
+    ADD COLUMN IF NOT EXISTS stats_tmax REAL,
+    ADD COLUMN IF NOT EXISTS stats_tavg REAL,
+    ADD COLUMN IF NOT EXISTS stats_hmin REAL,
+    ADD COLUMN IF NOT EXISTS stats_hmax REAL,
+    ADD COLUMN IF NOT EXISTS stats_havg REAL,
+    ADD COLUMN IF NOT EXISTS stats_total INTEGER,
+    ADD COLUMN IF NOT EXISTS stats_errors INTEGER;
