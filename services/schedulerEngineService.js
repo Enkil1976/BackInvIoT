@@ -2,12 +2,22 @@ const cron = require('node-cron');
 const cronParser = require('cron-parser'); // Now used for next_execution_at calculation
 const pool = require('../config/db');
 const logger = require('../config/logger');
-const { app } = require('../server'); // For WebSocket broadcasts
+// const { app } = require('../server'); // Removed for DI
 // const deviceService = require('./deviceService'); // No longer directly called for action execution by scheduler
 const operationService = require('./operationService'); // For logging execution by scheduler or by worker
 const { publishCriticalAction } = require('./queueService'); // For publishing actions
 
 let scheduledJob;
+let _broadcastWebSocket = null;
+
+function initSchedulerEngineService(dependencies) {
+  if (dependencies && dependencies.broadcastWebSocket) {
+    _broadcastWebSocket = dependencies.broadcastWebSocket;
+    logger.info('SchedulerEngineService initialized with broadcastWebSocket capability.');
+  } else {
+    logger.warn('SchedulerEngineService initialized WITHOUT broadcastWebSocket capability.');
+  }
+}
 
 async function checkAndExecuteDueTasks() {
   logger.info('Scheduler: Checking for due scheduled operations...');
@@ -287,24 +297,24 @@ async function checkAndExecuteDueTasks() {
     }
 
     // **WebSocket Broadcast (outside transaction, based on final status)**
-    if (app && app.locals && typeof app.locals.broadcastWebSocket === 'function') {
+    if (_broadcastWebSocket && typeof _broadcastWebSocket === 'function') {
         try {
-            app.locals.broadcastWebSocket({
-                type: executionStatus === 'SUCCESS' ? 'schedule_executed' : 'schedule_execution_failed',
+            _broadcastWebSocket({
+                type: executionStatus === 'SUCCESS' ? 'schedule_action_outcome' : 'schedule_action_outcome', // Consistent type
                 data: {
                     schedule_id: schedule.id,
                     device_id: schedule.device_id,
                     action_name: schedule.action_name,
-                    status: executionStatus, // Final status after try/catch
-                    details: executionDetails, // Contains error if any
-                    timestamp: new Date().toISOString()
+                    outcome_status: executionStatus, // 'SUCCESS' if queued, 'FAILURE' if not
+                    outcome_details: executionDetails,
+                    processed_at: new Date().toISOString()
                 }
             });
         } catch (broadcastError) {
-            logger.error(`Scheduler: Failed to broadcast WebSocket for schedule ID ${schedule.id}:`, broadcastError);
+            logger.error(`Scheduler: Failed to broadcast WebSocket for schedule ID ${schedule.id} outcome:`, broadcastError);
         }
     } else {
-        logger.warn(`[WebSocket Broadcast Simulated/Skipped] Event: ${executionStatus === 'SUCCESS' ? 'schedule_executed' : 'schedule_execution_failed'} for schedule ID ${schedule.id}. broadcastWebSocket not available.`);
+        logger.debug(`Scheduler: broadcastWebSocket not available for schedule ID ${schedule.id} outcome.`);
     }
   }
   logger.info('Scheduler: Finished processing all due tasks for this run.');
@@ -338,6 +348,7 @@ function stopScheduler() {
 }
 
 module.exports = {
+  initSchedulerEngineService,
   startScheduler,
   stopScheduler,
   // checkAndExecuteDueTasks, // Potentially export for manual triggering/testing

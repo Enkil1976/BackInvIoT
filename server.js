@@ -560,18 +560,49 @@ logger.info('✅ WebSocket server initialized and attached to HTTP server.');
 startScheduler();
 
 // Start the rules engine
-startRulesEngine();
+startRulesEngine(); // This will use the _broadcastWebSocket set by its init function
 
 // Start the Critical Action Worker
+// This worker already accepts broadcastWebSocket via its startWorker function argument, which is good.
 if (app.locals.broadcastWebSocket) {
   startCriticalActionWorker(app.locals.broadcastWebSocket);
 } else {
-  logger.error("CriticalActionWorker cannot start with broadcast capability: app.locals.broadcastWebSocket is not defined.");
-  // Decide if worker should start without broadcast, or if this is a fatal error
-  // For now, let's start it without, but log heavily.
-  logger.warn("Starting CriticalActionWorker WITHOUT WebSocket broadcast capability.");
+  logger.error("CriticalActionWorker cannot start with broadcast capability: app.locals.broadcastWebSocket is not defined. Worker will start without it.");
   startCriticalActionWorker();
 }
+
+
+// Initialize services with dependencies
+logger.info('Initializing services with dependencies...');
+const deviceService = require('./services/deviceService');
+if (deviceService.initDeviceService) {
+  deviceService.initDeviceService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initDeviceService not found on deviceService module. WebSocket broadcasts from this service may not work.');
+}
+
+const operationService = require('./services/operationService');
+if (operationService.initOperationService) {
+  operationService.initOperationService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initOperationService not found on operationService module. WebSocket broadcasts from this service may not work.');
+}
+
+const rulesEngineActualService = require('./services/rulesEngineService'); // Renamed to avoid conflict with startRulesEngine
+if (rulesEngineActualService.initRulesEngineService) {
+  rulesEngineActualService.initRulesEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initRulesEngineService not found on rulesEngineService module. WebSocket broadcasts from this service may not work.');
+}
+
+const schedulerEngineService = require('./services/schedulerEngineService'); // Renamed to avoid conflict
+if (schedulerEngineService.initSchedulerEngineService) {
+  schedulerEngineService.initSchedulerEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initSchedulerEngineService not found on schedulerEngineService module. WebSocket broadcasts from this service may not work.');
+}
+logger.info('Services initialized.');
+
 
 // Manejo de cierre adecuado
 process.on('SIGTERM', () => {

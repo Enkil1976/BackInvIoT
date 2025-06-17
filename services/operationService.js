@@ -1,6 +1,17 @@
 const pool = require('../config/db');
 const logger = require('../config/logger');
-const { app } = require('../server'); // Import app to access app.locals for WebSocket broadcasting
+// const { app } = require('../server'); // Removed: To be replaced by DI
+
+let _broadcastWebSocket = null;
+
+function initOperationService(dependencies) {
+  if (dependencies && dependencies.broadcastWebSocket) {
+    _broadcastWebSocket = dependencies.broadcastWebSocket;
+    logger.info('OperationService initialized with broadcastWebSocket capability.');
+  } else {
+    logger.warn('OperationService initialized WITHOUT broadcastWebSocket capability.');
+  }
+}
 
 async function recordOperation({
   userId,
@@ -40,19 +51,18 @@ async function recordOperation({
     const newOperationLog = result.rows[0];
     logger.info(`Operation recorded: ${serviceName} - ${action} (Log ID: ${newOperationLog.id}, Status: ${status})`);
 
-    if (app && app.locals && typeof app.locals.broadcastWebSocket === 'function') {
+    if (_broadcastWebSocket && typeof _broadcastWebSocket === 'function') {
       try {
-        app.locals.broadcastWebSocket({
+        _broadcastWebSocket({
           type: 'operation_recorded',
           data: newOperationLog
         });
-        logger.info(`WebSocket broadcast sent for operation_recorded: Log ID ${newOperationLog.id}`);
+        // logger.info(`WebSocket broadcast sent for operation_recorded: Log ID ${newOperationLog.id}`); // Optional log
       } catch (broadcastError) {
-        logger.error('Failed to broadcast WebSocket message for operation_recorded:', broadcastError);
+        logger.error('Error broadcasting operation_recorded event from OperationService:', broadcastError);
       }
     } else {
-      logger.warn('[WebSocket Broadcast Simulated/Skipped] Event: operation_recorded. broadcastWebSocket not available.', { data: newOperationLog });
-      // TODO: Ensure broadcastWebSocket is properly accessible if this warning appears.
+       logger.debug('broadcastWebSocket not initialized in OperationService for operation_recorded event.');
     }
     return newOperationLog;
   } catch (err) {
@@ -125,6 +135,7 @@ async function getOperations(queryParams = {}) {
 }
 
 module.exports = {
+  initOperationService, // Added init function
   recordOperation,
   getOperations,
 };
