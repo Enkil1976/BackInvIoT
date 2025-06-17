@@ -28,29 +28,50 @@ const connectMqtt = () => {
   client = mqtt.connect(MQTT_BROKER_URL, options);
 
   client.on('connect', () => {
-    logger.info('✅ MQTT connected to broker');
-    subscribeToTopics();
+    logger.info('✅ MQTT Client: Successfully connected to broker.');
+    subscribeToTopics(); // Call to separate subscribe function
+    logger.info('MQTT Client: Processed connect event and initiated subscriptions.');
   });
 
   client.on('reconnect', () => {
-    logger.info('🔄 MQTT reconnecting...');
+    logger.warn('MQTT Client: Attempting to reconnect...');
   });
 
   client.on('error', (error) => {
-    logger.error('MQTT connection error:', error);
+    logger.error('MQTT Client: Connection Error:', error);
+  });
+
+  client.on('close', () => {
+    logger.warn('MQTT Client: Connection closed.');
+  });
+
+  client.on('offline', () => {
+    logger.warn('MQTT Client: Currently offline.');
   });
 
   client.on('message', (topic, message) => {
+    logger.info(`MQTT Client: --- 'message' event fired --- Topic: ${topic}`);
+    // Note: Raw payload is logged at the start of handleIncomingMessage itself.
     handleIncomingMessage(topic, message);
   });
 };
 
 const subscribeToTopics = () => {
-  client.subscribe(MQTT_TOPIC_TO_SUBSCRIBE, (err) => {
+  if (!client) {
+    logger.error('MQTT Client: Cannot subscribe, client not initialized.');
+    return;
+  }
+  client.subscribe(MQTT_TOPIC_TO_SUBSCRIBE, (err, granted) => {
     if (!err) {
-      logger.info(`✅ Subscribed to topic: ${MQTT_TOPIC_TO_SUBSCRIBE}`);
+      if (granted && granted.length > 0 && granted[0].topic === MQTT_TOPIC_TO_SUBSCRIBE) {
+        logger.info(`MQTT Client: ✅ Successfully subscribed to topic: ${granted[0].topic} with QoS ${granted[0].qos}`);
+      } else if (granted && granted.length > 0) {
+        logger.warn(`MQTT Client: Subscribed to ${MQTT_TOPIC_TO_SUBSCRIBE}, but grant info is unexpected:`, granted);
+      } else {
+         logger.warn(`MQTT Client: Subscribed to ${MQTT_TOPIC_TO_SUBSCRIBE}, but no grant information returned (or subscription silently failed).`);
+      }
     } else {
-      logger.error('MQTT subscription error:', err);
+      logger.error(`MQTT Client: ❌ Subscription error for topic ${MQTT_TOPIC_TO_SUBSCRIBE}:`, err);
     }
   });
 };
