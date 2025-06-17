@@ -6,6 +6,7 @@ const cors = require('cors');
 const moment = require('moment');
 const winston = require('winston');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
+const WebSocket = require('ws'); // Require WebSocket library
 
 // Configuración de logger
 const logger = winston.createLogger({
@@ -49,6 +50,10 @@ connectMqtt();
 const app = express();
 
 const authRouter = require('./routes/auth');
+const deviceRoutes = require('./routes/devices'); // Import device routes
+const operationRoutes = require('./routes/operations'); // Import operation routes
+const scheduledOperationRoutes = require('./routes/scheduledOperations'); // Import scheduled operation routes
+const ruleRoutes = require('./routes/rules'); // Import rule routes
 
 // CORS Config (mejorado para producción)
 const allowedOrigins = process.env.CORS_ORIGINS ? 
@@ -95,6 +100,10 @@ app.use(express.json());
 
 // Montar rutas de autenticación
 app.use('/api/auth', authRouter);
+app.use('/api/devices', deviceRoutes); // Use device routes
+app.use('/api/operations', operationRoutes); // Use operation routes
+app.use('/api/scheduled-operations', scheduledOperationRoutes); // Use scheduled operation routes
+app.use('/api/rules', ruleRoutes); // Use rule routes
 
 // Cache Middleware (con invalidación por escritura)
 const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {
@@ -452,14 +461,86 @@ const server = app.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
 });
 
+// WebSocket Server Setup
+const wss = new WebSocket.Server({ server });
+app.locals.wss = wss; // Make wss available in app.locals for shutdown and broadcasting
+
+wss.on('connection', (ws, req) => {
+  const clientIp = req.socket.remoteAddress; // Or req.headers['x-forwarded-for'] if behind a proxy
+  logger.info(`WebSocket client connected: ${clientIp}`);
+
+  ws.on('message', (message) => {
+    // Attempt to parse message as JSON
+    try {
+      const parsedMessage = JSON.parse(message);
+      logger.info(`Received WebSocket message from ${clientIp}:`, parsedMessage);
+      // Example: Echo message back or handle specific message types
+      // ws.send(JSON.stringify({ type: 'echo', payload: parsedMessage }));
+    } catch (e) {
+      logger.info(`Received WebSocket message (non-JSON) from ${clientIp}: ${message}`);
+      // ws.send(`Received non-JSON message: ${message}`);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    logger.info(`WebSocket client disconnected: ${clientIp} (Code: ${code}, Reason: ${reason || 'No reason given'})`);
+  });
+
+  ws.on('error', (error) => {
+    logger.error(`WebSocket error for client ${clientIp}:`, error);
+  });
+
+  ws.send(JSON.stringify({ type: 'info', message: 'WebSocket connection established successfully.' }));
+});
+
+app.locals.broadcastWebSocket = (messageObject) => {
+  if (!app.locals.wss) {
+    logger.error('WebSocket server (wss) not initialized on app.locals. Cannot broadcast.');
+    return;
+  }
+  const messageString = JSON.stringify(messageObject);
+  logger.info(`Broadcasting WebSocket message to all clients: ${messageString}`);
+  app.locals.wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(messageString);
+      } catch (error) {
+        logger.error('Error sending message to a WebSocket client:', error);
+      }
+    }
+  });
+};
+
+logger.info('✅ WebSocket server initialized and attached to HTTP server.');
+
 // Manejo de cierre adecuado
 process.on('SIGTERM', () => {
+  logger.info('SIGTERM signal received: closing HTTP server.');
   server.close(() => {
-    pool.end();
-    redisClient.disconnect();
-    disconnectMqtt();
-    logger.info('Server terminated');
-    process.exit(0);
+    logger.info('HTTP server closed.');
+    pool.end(() => logger.info('PostgreSQL pool ended.'));
+    redisClient.disconnect(); // Assumes this logs its own completion or is quick
+    if (typeof disconnectMqtt === 'function') {
+        disconnectMqtt(); // Assumes this logs its own completion or is quick
+    }
+
+    if (app.locals.wss) {
+      logger.info('Closing WebSocket server...');
+      app.locals.wss.close(() => {
+        logger.info('WebSocket server closed.');
+        logger.info('All services closed. Exiting process.');
+        process.exit(0);
+      });
+      // Force close remaining WS connections after a timeout if wss.close() hangs
+      setTimeout(() => {
+        logger.warn('WebSocket server close timed out. Forcing client termination.');
+        app.locals.wss.clients.forEach(client => client.terminate());
+        process.exit(1); // Exit with error code if shutdown hangs
+      }, 5000); // 5 seconds timeout
+    } else {
+      logger.info('All services closed (WebSocket server not initialized). Exiting process.');
+      process.exit(0);
+    }
   });
 });
 
