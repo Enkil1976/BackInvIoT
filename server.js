@@ -60,6 +60,7 @@ const deviceRoutes = require('./routes/devices'); // Import device routes
 const operationRoutes = require('./routes/operations'); // Import operation routes
 const scheduledOperationRoutes = require('./routes/scheduledOperations'); // Import scheduled operation routes
 const ruleRoutes = require('./routes/rules'); // Import rule routes
+const systemAdminRoutes = require('./routes/systemAdmin'); // Import system admin routes
 
 // CORS Config (mejorado para producción)
 const allowedOrigins = process.env.CORS_ORIGINS ? 
@@ -110,6 +111,7 @@ app.use('/api/devices', deviceRoutes); // Use device routes
 app.use('/api/operations', operationRoutes); // Use operation routes
 app.use('/api/scheduled-operations', scheduledOperationRoutes); // Use scheduled operation routes
 app.use('/api/rules', ruleRoutes); // Use rule routes
+app.use('/api/system', systemAdminRoutes); // Use system admin routes
 
 // Cache Middleware (con invalidación por escritura)
 const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {

@@ -318,6 +318,111 @@ These tests verify that the system prevents the creation or update of schedules 
         -   A `schedule_action_outcome` event when the scheduler queues the action.
         -   A `queued_action_executed` event when the worker processes the action.
 
+### System Administration API Endpoints
+
+This section covers API endpoints typically used for system administration and monitoring.
+
+#### Get Critical Actions DLQ Messages
+
+-   **Endpoint:** `GET /api/system/dlq/critical-actions`
+-   **Description:** Retrieves messages from the Dead-Letter Queue (DLQ) for critical actions. These are actions (e.g., device status changes, scheduled notifications) that failed all processing attempts by the background worker and were moved to the DLQ for manual inspection or reprocessing.
+-   **Authentication:** Required (Bearer Token).
+-   **Authorization:** Requires 'admin' role.
+-   **Query Parameters:**
+    -   `start` (string, optional): The Redis Stream message ID from which to start fetching messages. Defaults to `-` (oldest message). Example: `1678886400000-0`.
+    -   `end` (string, optional): The Redis Stream message ID at which to stop fetching messages. Defaults to `+` (newest message). Example: `1678886500000-0`.
+    -   `count` (integer, optional): The maximum number of messages to retrieve. Defaults to `50`.
+-   **Success Response (200 OK):**
+    -   Description: An array of DLQ message objects. Each object contains the DLQ message ID and its parsed data.
+    -   Example Payload:
+        ```json
+        [
+          {
+            "id": "1678886400000-0", // Example Stream Message ID from DLQ
+            "data": {
+              "original_message_id": "1678886300000-0", // ID of the message in the original stream
+              "original_stream": "critical_actions_stream", // Name of the original stream
+              "original_payload_string": "{\"type\":\"device_action\",\"targetService\":\"deviceService\",\"targetMethod\":\"updateDeviceStatus\",\"payload\":{\"deviceId\":\"hw_id_xyz\",\"status\":\"on_error_case\"},\"origin\":{\"service\":\"SchedulerEngineService\",\"scheduleId\":1},\"actor\":\"SchedulerEngineService\",\"published_at\":\"2023-03-15T11:58:20.000Z\"}", // Raw original payload
+              "parsed_action": { // The original action that was attempted
+                "type": "device_action",
+                "targetService": "deviceService",
+                "targetMethod": "updateDeviceStatus",
+                "payload": { "deviceId": "hw_id_xyz", "status": "on_error_case" },
+                "origin": { "service": "SchedulerEngineService", "scheduleId": 1 }
+              },
+              "actor": "SchedulerEngineService", // Who/what originally published the action
+              "published_at_original": "2023-03-15T11:58:20.000Z", // When it was first published to main queue
+              "last_error_message": "Device not responding after 3 attempts.", // Reason for failure
+              "attempts_made": 3, // Number of processing attempts
+              "failed_at": "2023-03-15T12:00:00.000Z", // When it was moved to DLQ
+              "dlq_reason": "Max retries reached or non-retryable error during processing" // General reason for being in DLQ
+            }
+          }
+          // ... more messages if any
+        ]
+        ```
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have the 'admin' role.
+    -   `500 Internal Server Error`: If there's an issue fetching messages from the DLQ (e.g., Redis connectivity problem).
+
+#### Testing DLQ Message Viewing (`/api/system/dlq/critical-actions`)
+
+These tests verify the ability to view messages that have landed in the Critical Actions Dead-Letter Queue (DLQ).
+
+**Prerequisites:**
+-   An authenticated user with the 'admin' role.
+-   The `criticalActionWorker.js` must be running.
+-   Knowledge of how to publish actions that will predictably fail and end up in the DLQ.
+
+**Test Case 1: Forcing a Message to the DLQ and Viewing It**
+
+1.  **Identify or Create a Scenario for Action Failure:**
+    -   **Option A (Non-existent device):**
+        -   Ensure there is no device with hardware ID (e.g., `device_id`) "NON_EXISTENT_HW_ID".
+        -   Create a scheduled operation (via `POST /api/scheduled-operations`) or a rule (via `POST /api/rules`) that attempts to perform an action on this "NON_EXISTENT_HW_ID". For example, an action to `updateDeviceStatus`.
+            ```json
+            // Example for a scheduled operation action_params:
+            // "action_name": "set_status",
+            // "action_params": { "status": "on" }
+            // (Ensure the schedule targets a device_id that will translate to "NON_EXISTENT_HW_ID"
+            //  or directly use a rule action that specifies "NON_EXISTENT_HW_ID")
+
+            // Example for a rule action in rule.actions:
+            // { "service": "deviceService", "method": "updateDeviceStatus",
+            //   "target_device_id": "NON_EXISTENT_HW_ID", "params": {"status": "on"} }
+            ```
+    -   **Option B (Invalid Action Payload for Worker):**
+        -   Create a scheduled operation or rule that queues an action with a valid `targetService` and `targetMethod` but an intentionally malformed `payload` that will cause the worker's `processMessage` logic for that action to consistently throw an error (and not be a non-retryable config error at the dispatcher level). For example, for `deviceService.setDeviceConfiguration`, send a non-object `config`.
+2.  **Trigger the Failing Action:**
+    -   If using a scheduled operation, wait for it to execute.
+    -   If using a rule, ensure the rule's conditions are met to trigger its actions.
+3.  **Observe Worker Logs:**
+    -   You should see the `criticalActionWorker.js` attempt to process the message multiple times (e.g., `MAX_EXECUTION_RETRIES` times).
+    -   Eventually, you should see logs indicating the message failed all retries and is being moved to the DLQ (e.g., "Moving to DLQ..." and "Message ID ... successfully moved to DLQ...").
+    -   An operation log with `action: 'queued_action_failed_dlq'` should also be created.
+4.  **View the DLQ via API:**
+    -   As an admin user, make a GET request to `/api/system/dlq/critical-actions`.
+    -   Verify: 200 OK.
+    -   The response body should be an array containing at least one message.
+    -   Inspect the message data:
+        -   `id` should be the Redis Stream ID of the message in the DLQ.
+        -   `data.original_message_id` should match the ID of the message that failed from the main `critical_actions_stream`.
+        -   `data.parsed_action` (or `original_payload_string`) should reflect the action you queued.
+        -   `data.last_error_message` should indicate the reason for failure.
+        -   `data.attempts_made` should be equal to `MAX_EXECUTION_RETRIES`.
+5.  **Test Pagination (Optional):**
+    -   If you have many messages in the DLQ (or can generate them), test the `count`, `start`, and `end` query parameters:
+        -   `GET /api/system/dlq/critical-actions?count=1`
+        -   Note the ID of the first message. Use it as the `start` for the next query to get subsequent messages (e.g., `GET /api/system/dlq/critical-actions?start=<ID_of_first_message>&count=1`).
+
+**Test Case 2: Viewing an Empty DLQ**
+1.  Ensure the DLQ stream (`critical_actions_dlq`) is empty or delete it from Redis (`DEL critical_actions_dlq`). (Requires Redis CLI access or a temporary admin API if built).
+2.  **View the DLQ via API:**
+    -   `GET /api/system/dlq/critical-actions`
+    -   Verify: 200 OK.
+    -   The response body should be an empty array `[]`.
+
 ## Device Management
 
 ### Device Types and Configuration
