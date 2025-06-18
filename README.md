@@ -366,7 +366,7 @@ The application is configured to subscribe to topics under the root `Invernadero
     -   Payload (JSON): Contains fields like `temperatura`, `humedad`, and a nested `stats` object. (Refer to `services/mqttService.js` for full structure).
 -   **Water Quality Sensors (Agua):**
     -   Topic: `Invernadero/Agua/data`
-    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temperatura_agua": <number_optional>}`
+    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temp": <number_optional>}` (Note: `temp` is for water temperature if sent in this payload)
     -   Topic: `Invernadero/Agua/Temperatura`
     -   Payload (Text): Plain text number representing water temperature.
 -   **Power Monitoring Sensors:**

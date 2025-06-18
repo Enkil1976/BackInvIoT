@@ -162,7 +162,7 @@ const handleIncomingMessage = async (topic, message) => {
           return;
         }
         query = `INSERT INTO ${tableName} (ph, ec, ppm, temperatura_agua, received_at) VALUES ($1, $2, $3, $4, $5);`;
-        values = [data.ph, data.ec, data.ppm, data.temperatura_agua || null, receivedAt];
+        values = [data.ph, data.ec, data.ppm, data.temp || null, receivedAt]; // Use data.temp here
 
         const sensorKeyAguaData = `sensor_latest:calidad_agua`;
         logger.debug(`MQTT Handler: Attempting Redis update for Agua/data using key ${sensorKeyAguaData}`);
@@ -171,18 +171,28 @@ const handleIncomingMessage = async (topic, message) => {
             'ph': data.ph, 'ec': data.ec, 'ppm': data.ppm,
             'last_updated_multiparam': receivedAt.toISOString()
           };
-          if (data.temperatura_agua !== undefined) {
-            redisPayload['temperatura_agua'] = data.temperatura_agua;
+          if (data.temp !== undefined) { // Check for data.temp
+            redisPayload['temperatura_agua'] = data.temp; // Store as 'temperatura_agua'
           }
           await redisClient.hmset(sensorKeyAguaData, redisPayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaData} (multi-param)`);
 
           const paramsToLogHistory = ['ph', 'ec', 'ppm'];
-          if (data.temperatura_agua !== undefined) paramsToLogHistory.push('temperatura_agua');
+          if (data.temp !== undefined) { // Check for data.temp for history logging decision
+            paramsToLogHistory.push('temperatura_agua'); // Logged under metric 'temperatura_agua'
+          }
+
           for (const param of paramsToLogHistory) {
-              if (data[param] !== undefined) {
+              let valueToLog;
+              if (param === 'temperatura_agua') {
+                valueToLog = data.temp; // Get value from data.temp for this specific metric
+              } else {
+                valueToLog = data[param]; // Get value from data.ph, data.ec, etc.
+              }
+
+              if (valueToLog !== undefined) {
                   const listKey = `sensor_history:calidad_agua:${param}`;
-                  const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data[param] });
+                  const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: valueToLog });
                   logger.debug(`MQTT Handler: Attempting Redis list update for ${listKey}`);
                   try {
                       await redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec();
