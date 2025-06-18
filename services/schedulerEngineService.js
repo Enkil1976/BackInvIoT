@@ -142,6 +142,54 @@ async function checkAndExecuteDueTasks() {
                 executionDetails = { error: `Failed to prepare or queue 'apply_device_config': ${errorOccurredObject.message}` };
             }
         }
+      } else if (schedule.action_name === 'send_notification') {
+        if (!schedule.action_params || !schedule.action_params.subject || !schedule.action_params.body || !schedule.action_params.recipient_type || !schedule.action_params.recipient_target) {
+            executionStatus = 'FAILURE';
+            errorOccurredObject = new Error(`Invalid or missing parameters (subject, body, recipient_type, recipient_target) for 'send_notification' action, schedule ID ${schedule.id}.`);
+            logger.warn(errorOccurredObject.message, { params: schedule.action_params });
+            executionDetails = { error: errorOccurredObject.message, params: schedule.action_params };
+        } else {
+            try { // No DB calls needed here before queuing, so no specific fetchOrQueueError try-catch needed for this part
+                const actionToQueue = {
+                    type: 'notification_action',
+                    targetService: 'notificationService',
+                    targetMethod: 'sendNotification',
+                    payload: {
+                        subject: schedule.action_params.subject,
+                        body: schedule.action_params.body,
+                        recipient_type: schedule.action_params.recipient_type,
+                        recipient_target: schedule.action_params.recipient_target,
+                        type: schedule.action_params.type || 'info', // Default notification type
+                        originDetails: { // Details about the source of this notification trigger
+                           service: 'SchedulerEngineService',
+                           scheduleId: schedule.id,
+                           scheduleName: schedule.name
+                        }
+                    },
+                    origin: { // For the queue message itself
+                        service: 'SchedulerEngineService',
+                        scheduleId: schedule.id,
+                        scheduleName: schedule.name
+                    }
+                };
+                const messageId = await publishCriticalAction(actionToQueue, 'SchedulerEngineService');
+                if (messageId) {
+                    logger.info(`Scheduler: Action 'send_notification' for schedule ID ${schedule.id} published to queue. Msg ID: ${messageId}`);
+                    executionStatus = 'SUCCESS';
+                    executionDetails = { message: `Action 'send_notification' queued successfully. Msg ID: ${messageId}`, queuedAction: actionToQueue };
+                } else {
+                    executionStatus = 'FAILURE';
+                    errorOccurredObject = new Error(`Failed to publish 'send_notification' action to queue for schedule ID ${schedule.id}.`);
+                    logger.error(errorOccurredObject.message, { actionToQueue });
+                    executionDetails = { error: errorOccurredObject.message, actionAttempted: actionToQueue };
+                }
+            } catch (queueError) { // Catch any unexpected error during action prep or publish
+                executionStatus = 'FAILURE';
+                errorOccurredObject = queueError;
+                logger.error(`Scheduler: Error during 'send_notification' preparation or queuing for schedule ID ${schedule.id}: ${errorOccurredObject.message}`);
+                executionDetails = { error: `Failed to prepare or queue 'send_notification': ${errorOccurredObject.message}` };
+            }
+        }
       } else if (schedule.action_name === 'log_generic_event' && schedule.action_params) {
         const { log_message, log_level = 'INFO', details: log_details } = schedule.action_params;
         if (!log_message) {

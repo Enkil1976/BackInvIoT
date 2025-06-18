@@ -96,7 +96,6 @@ This section details other API endpoints available in the application.
 ### Device Service API Endpoints
 
 #### Get Device Consumption History
-
 - **Endpoint:** `GET /api/devices/:id/consumption-history`
 - **Description:** Retrieves the power consumption history (voltage, current, power readings over time) for a specified device. The `:id` in the path refers to the ID of the device being monitored (from the `devices` table), not the ID of the power sensor itself.
 - **Auth:** Requires authentication (Bearer Token).
@@ -161,8 +160,41 @@ Creates a new scheduled operation.
     -   `400 Bad Request`: Invalid input data (e.g., missing required fields, invalid cron expression, invalid `execute_at` date).
     -   `401 Unauthorized`: Missing or invalid JWT.
     -   `403 Forbidden`: User does not have permission.
-    -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and a limited number of near-future occurrences (e.g., next 5) for cron-based schedules.
+    -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and the next few occurrences (e.g., next 5 or within a 48-hour window) for cron-based schedules. (This does not yet account for action durations).
     -   `500 Internal Server Error`: Server-side error.
+
+-   **Supported `action_name` values and their `action_params`:**
+    -   `set_status`:
+        -   Purpose: Changes the status of the target device.
+        -   `action_params`: `{ "status": "on" }` or `{ "status": "off" }` (or any other valid status string for the device type).
+    -   `apply_device_config`:
+        -   Purpose: Updates the `config` JSONB field of the target device.
+        -   `action_params`: `{ "config": { "key1": "value1", "brightness": 80 } }` (The content of `config` is specific to the device type).
+    -   `log_generic_event`:
+        -   Purpose: Records a generic event/log message via the `operationService`. This is useful for creating scheduled reminders or markers in the system logs.
+        -   `action_params`:
+            -   `log_message` (string, required): The primary message for the log.
+            -   `log_level` (string, optional, defaults to 'INFO'): Severity/type of log (e.g., 'INFO', 'WARN', 'ERROR').
+            -   `details` (object, optional): Additional structured data for the log.
+        -   Example: `{ "log_message": "Nightly backup process initiated.", "log_level": "INFO", "details": { "target_db": "main_cluster" } }`
+    -   `send_notification`:
+        -   Purpose: Schedules a notification to be processed by the `NotificationService`. Initially, this means the notification details will be logged, and an operation recorded. Future enhancements could involve sending actual emails, SMS, etc.
+        -   `action_params`:
+            -   `subject` (string, required): Subject line for the notification.
+            -   `body` (string, required): Main content/body of the notification.
+            -   `recipient_type` (string, required): Category or type of recipient (e.g., "system_log", "admin_dashboard", "email_user_group_X", "specific_user_id"). This guides how the notification might be processed or routed.
+            -   `recipient_target` (string, required): Specific target within the `recipient_type` (e.g., for "system_log", this could be "maintenance_alerts"; for "email_user_group_X", it could be "marketing_subscribers"; for "specific_user_id", it could be the user's actual ID).
+            -   `type` (string, optional, defaults to 'info'): Type/severity of the notification (e.g., 'info', 'warning', 'error', 'alert').
+        -   Example:
+            ```json
+            {
+              "subject": "Low Stock Alert: Product XYZ",
+              "body": "Product XYZ stock is below the threshold. Current stock: 5 units.",
+              "recipient_type": "inventory_alert_channel",
+              "recipient_target": "warehouse_managers_group",
+              "type": "warning"
+            }
+            ```
 
 #### `PUT /api/scheduled-operations/:id`
 Updates an existing scheduled operation.
@@ -176,7 +208,7 @@ Updates an existing scheduled operation.
     -   `401 Unauthorized`: Missing or invalid JWT.
     -   `403 Forbidden`: User does not have permission.
     -   `404 Not Found`: Scheduled operation with the given `id` not found.
-    -   `409 Conflict`: Returned if the updated schedule's execution time(s) directly clash with another existing enabled schedule for the same device (excluding itself). The conflict detection logic is similar to the POST endpoint.
+    -   `409 Conflict`: Returned if the updated schedule's execution time(s) directly clash with another existing enabled schedule for the same device (excluding itself). The system checks for exact time matches, considering the next execution for one-time tasks and the next few occurrences (e.g., next 5 or within a 48-hour window) for cron-based schedules. (This does not yet account for action durations).
     -   `500 Internal Server Error`: Server-side error.
 
 #### Manual Testing Guidelines for Schedule Conflict Validation
@@ -246,6 +278,284 @@ These tests verify that the system prevents the creation or update of schedules 
     - `PUT /api/scheduled-operations/<schedule_7_id>`
     - Body: `{ "is_enabled": true }`
     - Verify: **409 Conflict**.
+
+#### Testing Scheduled Notifications
+
+**Test Case: Schedule a 'send_notification' action.**
+1.  **Create Schedule:**
+    -   `POST /api/scheduled-operations`
+    -   Body Example:
+        ```json
+        {
+          "device_id": null, // Or a relevant device_id if notification is device-specific
+          "action_name": "send_notification",
+          "action_params": {
+            "subject": "Scheduled System Maintenance Reminder",
+            "body": "System will undergo scheduled maintenance in 1 hour.",
+            "recipient_type": "system_log",
+            "recipient_target": "maintenance_alerts",
+            "type": "warning"
+          },
+          "execute_at": "YYYY-MM-DDTHH:MM:00Z" // A near future time (UTC)
+        }
+        ```
+    -   Verify: 201 Created. Note the schedule `id`.
+2.  **Observe Execution (when `execute_at` time arrives):**
+    -   The `criticalActionWorker` should pick up the queued action.
+    -   The `notificationService.sendNotification` should be called by the worker.
+3.  **Verify Logs:**
+    -   Check `operations_log` (via `GET /api/operations` or direct DB query) for entries related to this scheduled notification:
+        -   An entry from `SchedulerEngineService` with `action: 'schedule_action_queued'` for this schedule ID, indicating the `send_notification` action was successfully queued.
+        -   An entry from `CriticalActionWorker` with `action: 'queued_action_executed'`, where `targetService: 'notificationService'` and `targetMethod: 'sendNotification'`. The `details.originalAction.payload` should match your `action_params`.
+        -   An entry from `NotificationService` (logged via `operationService.recordOperation` call within `sendNotification`) with `action: 'notification_sent_log'`. The `details` should contain your notification's subject, body, type, etc.
+    -   Check application console logs (or your configured log output) for lines similar to:
+        -   `Scheduler: Action 'send_notification' for schedule ID <your_schedule_id> published to queue. Msg ID: <message_id>`
+        -   `CriticalActionWorker: Executing action for message ID <message_id>: ... "targetService":"notificationService","targetMethod":"sendNotification" ...`
+        -   `NotificationService: [WARNING] To: system_log (\`maintenance_alerts\`) - Subject: "Scheduled System Maintenance Reminder" ...` (The type like `[WARNING]` and content will match your `action_params`).
+4.  **Verify WebSocket (Optional):**
+    -   If you are monitoring WebSocket messages, you should observe:
+        -   A `schedule_action_outcome` event when the scheduler queues the action.
+        -   A `queued_action_executed` event when the worker processes the action.
+
+### System Administration API Endpoints
+
+This section covers API endpoints typically used for system administration and monitoring.
+
+#### Get Critical Actions DLQ Messages
+
+-   **Endpoint:** `GET /api/system/dlq/critical-actions`
+-   **Description:** Retrieves messages from the Dead-Letter Queue (DLQ) for critical actions. These are actions (e.g., device status changes, scheduled notifications) that failed all processing attempts by the background worker and were moved to the DLQ for manual inspection or reprocessing.
+-   **Authentication:** Required (Bearer Token).
+-   **Authorization:** Requires 'admin' role.
+-   **Query Parameters:**
+    -   `start` (string, optional): The Redis Stream message ID from which to start fetching messages. Defaults to `-` (oldest message). Example: `1678886400000-0`.
+    -   `end` (string, optional): The Redis Stream message ID at which to stop fetching messages. Defaults to `+` (newest message). Example: `1678886500000-0`.
+    -   `count` (integer, optional): The maximum number of messages to retrieve. Defaults to `50`.
+-   **Success Response (200 OK):**
+    -   Description: An array of DLQ message objects. Each object contains the DLQ message ID and its parsed data.
+    -   Example Payload:
+        ```json
+        [
+          {
+            "id": "1678886400000-0", // Example Stream Message ID from DLQ
+            "data": {
+              "original_message_id": "1678886300000-0", // ID of the message in the original stream
+              "original_stream": "critical_actions_stream", // Name of the original stream
+              "original_payload_string": "{\"type\":\"device_action\",\"targetService\":\"deviceService\",\"targetMethod\":\"updateDeviceStatus\",\"payload\":{\"deviceId\":\"hw_id_xyz\",\"status\":\"on_error_case\"},\"origin\":{\"service\":\"SchedulerEngineService\",\"scheduleId\":1},\"actor\":\"SchedulerEngineService\",\"published_at\":\"2023-03-15T11:58:20.000Z\"}", // Raw original payload
+              "parsed_action": { // The original action that was attempted
+                "type": "device_action",
+                "targetService": "deviceService",
+                "targetMethod": "updateDeviceStatus",
+                "payload": { "deviceId": "hw_id_xyz", "status": "on_error_case" },
+                "origin": { "service": "SchedulerEngineService", "scheduleId": 1 }
+              },
+              "actor": "SchedulerEngineService", // Who/what originally published the action
+              "published_at_original": "2023-03-15T11:58:20.000Z", // When it was first published to main queue
+              "last_error_message": "Device not responding after 3 attempts.", // Reason for failure
+              "attempts_made": 3, // Number of processing attempts
+              "failed_at": "2023-03-15T12:00:00.000Z", // When it was moved to DLQ
+              "dlq_reason": "Max retries reached or non-retryable error during processing" // General reason for being in DLQ
+            }
+          }
+          // ... more messages if any
+        ]
+        ```
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have the 'admin' role.
+    -   `500 Internal Server Error`: If there's an issue fetching messages from the DLQ (e.g., Redis connectivity problem).
+
+---
+#### `POST /api/system/dlq/critical-actions/message/{messageId}/retry`
+Attempts to re-queue a specific message from the Critical Actions DLQ back to the main processing queue.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Path Parameters:**
+    -   `messageId` (string, required): The Redis Stream ID of the message in the DLQ (e.g., "1678886400000-0").
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ message re-queued successfully.",
+      "originalDlqMessageId": "1678886400000-0",
+      "newQueueMessageId": "1678886900000-0"
+    }
+    ```
+    Or if re-queueing failed internally (e.g., publish to main queue failed):
+    ```json
+    {
+      "success": false,
+      "message": "Failed to re-queue message to main stream.",
+      "originalDlqMessageId": "1678886400000-0"
+    }
+    ```
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid `messageId` format.
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `404 Not Found`: If the `messageId` does not exist in the DLQ.
+    -   `500 Internal Server Error`: Server-side error during processing.
+
+---
+#### `DELETE /api/system/dlq/critical-actions/message/{messageId}`
+Deletes a specific message from the Critical Actions DLQ.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Path Parameters:**
+    -   `messageId` (string, required): The Redis Stream ID of the message in the DLQ.
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ message deleted.",
+      "deletedMessageId": "1678886400000-0",
+      "deletedCount": 1
+    }
+    ```
+-   **Response when message not found (Status 404 Not Found):**
+    ```json
+    {
+      "success": false,
+      "message": "DLQ message not found or already deleted.",
+      "deletedMessageId": "1678886400000-0",
+      "deletedCount": 0
+    }
+    ```
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid `messageId` format.
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error.
+
+---
+#### `POST /api/system/dlq/critical-actions/retry-all`
+Attempts to re-queue all messages currently in the Critical Actions DLQ back to the main processing queue.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Query Parameters (Optional):**
+    -   `batchSize` (integer): While the API route might accept this, the current service implementation (`queueService.retryAllDlqMessages`) fetches and processes all messages in one go, not in batches. This parameter is noted for potential future enhancements.
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "message": "Retry all DLQ messages attempt complete.",
+      "totalAttempted": 5,
+      "successfullyRequeued": 4,
+      "failedToRequeue": 1
+    }
+    ```
+    Or if DLQ was empty:
+    ```json
+    {
+      "message": "DLQ is empty.",
+      "totalAttempted": 0,
+      "successfullyRequeued": 0,
+      "failedToRequeue": 0
+    }
+    ```
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error during processing.
+
+---
+#### `DELETE /api/system/dlq/critical-actions/clear-all`
+Deletes ALL messages from the Critical Actions DLQ by removing the DLQ stream itself. **Use with caution.**
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ stream 'critical_actions_dlq' deleted."
+    }
+    ```
+    (Note: If the stream didn't exist, Redis `DEL` command doesn't error, so the message would still typically indicate success in deleting/ensuring it's gone).
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error.
+
+#### Testing DLQ Message Viewing and Management (`/api/system/dlq/critical-actions/*`)
+
+These tests verify the ability to view and manage messages that have landed in the Critical Actions Dead-Letter Queue (DLQ).
+
+**Prerequisites:**
+-   An authenticated user with the 'admin' role.
+-   The `criticalActionWorker.js` must be running.
+-   Knowledge of how to publish actions that will predictably fail and end up in the DLQ.
+
+**Test Case 1: Forcing a Message to the DLQ and Viewing It**
+
+1.  **Identify or Create a Scenario for Action Failure:**
+    -   **Option A (Non-existent device):**
+        -   Ensure there is no device with hardware ID (e.g., `device_id`) "NON_EXISTENT_HW_ID".
+        -   Create a scheduled operation (via `POST /api/scheduled-operations`) or a rule (via `POST /api/rules`) that attempts to perform an action on this "NON_EXISTENT_HW_ID". For example, an action to `updateDeviceStatus`.
+            ```json
+            // Example for a scheduled operation action_params:
+            // "action_name": "set_status",
+            // "action_params": { "status": "on" }
+            // (Ensure the schedule targets a device_id that will translate to "NON_EXISTENT_HW_ID"
+            //  or directly use a rule action that specifies "NON_EXISTENT_HW_ID")
+
+            // Example for a rule action in rule.actions:
+            // { "service": "deviceService", "method": "updateDeviceStatus",
+            //   "target_device_id": "NON_EXISTENT_HW_ID", "params": {"status": "on"} }
+            ```
+    -   **Option B (Invalid Action Payload for Worker):**
+        -   Create a scheduled operation or rule that queues an action with a valid `targetService` and `targetMethod` but an intentionally malformed `payload` that will cause the worker's `processMessage` logic for that action to consistently throw an error (and not be a non-retryable config error at the dispatcher level). For example, for `deviceService.setDeviceConfiguration`, send a non-object `config`.
+2.  **Trigger the Failing Action:**
+    -   If using a scheduled operation, wait for it to execute.
+    -   If using a rule, ensure the rule's conditions are met to trigger its actions.
+3.  **Observe Worker Logs:**
+    -   You should see the `criticalActionWorker.js` attempt to process the message multiple times (e.g., `MAX_EXECUTION_RETRIES` times).
+    -   Eventually, you should see logs indicating the message failed all retries and is being moved to the DLQ (e.g., "Moving to DLQ..." and "Message ID ... successfully moved to DLQ...").
+    -   An operation log with `action: 'queued_action_failed_dlq'` should also be created.
+4.  **View the DLQ via API:**
+    -   As an admin user, make a GET request to `/api/system/dlq/critical-actions`.
+    -   Verify: 200 OK.
+    -   The response body should be an array containing at least one message.
+    -   Inspect the message data:
+        -   `id` should be the Redis Stream ID of the message in the DLQ.
+        -   `data.original_message_id` should match the ID of the message that failed from the main `critical_actions_stream`.
+        -   `data.parsed_action` (or `original_payload_string`) should reflect the action you queued.
+        -   `data.last_error_message` should indicate the reason for failure.
+        -   `data.attempts_made` should be equal to `MAX_EXECUTION_RETRIES`.
+5.  **Test Pagination (Optional):**
+    -   If you have many messages in the DLQ (or can generate them), test the `count`, `start`, and `end` query parameters:
+        -   `GET /api/system/dlq/critical-actions?count=1`
+        -   Note the ID of the first message. Use it as the `start` for the next query to get subsequent messages (e.g., `GET /api/system/dlq/critical-actions?start=<ID_of_first_message>&count=1`).
+
+**Test Case 2: Viewing an Empty DLQ**
+1.  Ensure the DLQ stream (`critical_actions_dlq`) is empty or delete it from Redis (`DEL critical_actions_dlq`). This can also be tested using the `DELETE /api/system/dlq/critical-actions/clear-all` endpoint.
+2.  **View the DLQ via API:**
+    -   `GET /api/system/dlq/critical-actions`
+    -   Verify: 200 OK.
+    -   The response body should be an empty array `[]`.
+
+**Test Case 3: Retrying and Deleting DLQ Messages**
+1.  Follow steps in **Test Case 1** to get at least one message into the DLQ. Note its `id`.
+2.  **Retry the specific DLQ message:**
+    -   `POST /api/system/dlq/critical-actions/message/{dlqMessageId}/retry` (replace `{dlqMessageId}` with the actual ID).
+    -   Verify: 200 OK. The response should indicate success and provide a `newQueueMessageId`.
+    -   Check worker logs: The action should be processed again. If it fails again, it will re-enter the DLQ (possibly with a new DLQ ID).
+    -   Verify with `GET /api/system/dlq/critical-actions`: The original DLQ message ID should no longer be present.
+3.  **Force another message to the DLQ.** Note its ID.
+4.  **Delete the specific DLQ message:**
+    -   `DELETE /api/system/dlq/critical-actions/message/{dlqMessageId}/delete` (replace `{dlqMessageId}` with the new ID).
+    -   Verify: 200 OK. The response should indicate success and `deletedCount: 1`.
+    -   Verify with `GET /api/system/dlq/critical-actions`: The message should be gone.
+    -   Attempt to delete the same ID again. Verify: 404 Not Found.
+
+**Test Case 4: Retry All and Clear All DLQ Messages**
+1.  Force several messages into the DLQ (e.g., 2-3 messages).
+2.  **Retry All DLQ messages:**
+    -   `POST /api/system/dlq/critical-actions/retry-all`
+    -   Verify: 200 OK. Inspect the response summary (totalAttempted, successfullyRequeued, failedToRequeue).
+    -   Verify with `GET /api/system/dlq/critical-actions`: The DLQ should now be empty (or only contain messages that failed re-queuing immediately).
+3.  If any messages remain or new ones are forced, test **Clear All:**
+    -   `DELETE /api/system/dlq/critical-actions/clear-all`
+    -   Verify: 200 OK. The response should indicate the stream was deleted.
+    -   Verify with `GET /api/system/dlq/critical-actions`: The DLQ should be empty.
 
 ## Device Management
 
@@ -344,6 +654,50 @@ You can restrict rules to specific times or days. All times and datetimes are pr
     { "source_type": "time", "condition_type": "datetime_range", "after_datetime": "2025-01-01T00:00:00Z", "before_datetime": "2025-01-31T23:59:59Z" }
     ```
 
+**Sensor History Conditions (`sensor_history`)**
+Evaluates a condition based on an aggregation of recent historical readings for a specific sensor metric. Uses data stored in Redis lists by `mqttService.js` (e.g., `sensor_history:temhum1:temperatura`).
+
+- `source_type: "sensor_history"`
+- `source_id: "<sensor_identifier_for_redis_key_base>"` (e.g., "temhum1", "calidad_agua", "power:PS001") - This is the base part of the Redis list key.
+- `metric: "<metric_name>"` (e.g., "temperatura", "voltage", "ph") - This is appended to `source_id` to form the full list key.
+- `aggregator: "avg" | "min" | "max" | "sum"` (Required - The aggregation function to apply to the historical values).
+- `operator: ">" | "<" | ">=" | "<=" | "==" | "!="` (Required - Comparison operator).
+- `value: <number>` (Required - The value to compare the aggregated result against).
+
+You must specify **either** `time_window` (to aggregate over a duration) **or** `samples` (to aggregate over a fixed number of recent readings). If both are provided, `time_window` will take precedence.
+
+-   **`time_window: "<duration_string>"`** (Optional, use if not using `samples`)
+    -   Specifies the duration of recent history to consider, relative to the current time. Data points within this duration (from their `ts` field) will be included in the aggregation.
+    -   Format: A string with a number followed by 's' (seconds), 'm' (minutes), or 'h' (hours).
+    -   Examples: `"30s"`, `"5m"`, `"2h"`.
+    -   *Example Clause (Average temperature over the last 10 minutes):*
+        ```json
+        {
+          "source_type": "sensor_history",
+          "source_id": "temhum1",
+          "metric": "temperatura",
+          "aggregator": "avg",
+          "time_window": "10m",
+          "operator": ">",
+          "value": 22
+        }
+        ```
+
+-   **`samples: <number>`** (Optional, use if not using `time_window`)
+    -   Number of the most recent samples to retrieve from the history list and aggregate.
+    -   *Example Clause (Maximum pH value from the last 5 samples):*
+        ```json
+        {
+          "source_type": "sensor_history",
+          "source_id": "calidad_agua",
+          "metric": "ph",
+          "aggregator": "max",
+          "samples": 5,
+          "operator": "<=",
+          "value": 7.5
+        }
+        ```
+
 **Combining Conditions Example:**
 Activate a fan if office temperature (from sensor `office_temp_hw_id` via Redis key `sensor_latest:office_temp_hw_id`) is above 25 AND it's a weekday between 9 AM and 5 PM UTC.
 ```json
@@ -437,6 +791,115 @@ This section provides guidance on how to manually test the rules engine.
 -   Monitor WebSocket messages for `rule_triggered` events if this is implemented.
 -   Check the `last_triggered_at` field of the rule being tested via `GET /api/rules/:id` to confirm if it was updated (or not).
 
+##### Testing Sensor History Conditions (`sensor_history`)
+
+These tests verify conditions based on aggregations of recent sensor readings from Redis Lists.
+
+**Prerequisites for Sensor History Testing:**
+-   Ensure `mqttService.js` is operational and correctly configured to push historical data for the relevant sensors to Redis Lists. For example, data for `temhum1`'s `temperatura` should be in `sensor_history:temhum1:temperatura`.
+-   You need a method to publish MQTT messages for the sensor and metric you intend to test (e.g., using an MQTT client tool). This allows you to populate the Redis history list with known values and timestamps.
+-   Verify that `SENSOR_HISTORY_MAX_LENGTH` (default 100 in `mqttService.js` and `rulesEngineService.js`) is adequate for your test scenarios, or be mindful of this limit. Data points older than this many entries might be trimmed from the list.
+
+**A. Testing with `samples`-based aggregation (Briefly)**
+-   **Scenario:** Trigger a rule if the average of the last 3 humidity readings for `temhum1` is above 60%.
+    1.  **Publish Data:** Publish 4+ MQTT messages to `Invernadero/TemHum1/data` with varying `humedad` values, ensuring the last 3 average above 60% (e.g., 50, 65, 70, 75 - last three are 65,70,75).
+    2.  **Rule Definition:**
+        ```json
+        {
+          "name": "High Avg Humidity Last 3 Samples",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum1", "metric": "humedad",
+            "aggregator": "avg", "samples": 3, "operator": ">", "value": 60
+          },
+          "actions": [ /* ... some action ... */ ]
+        }
+        ```
+    3.  **Verify:** The rule should trigger. If you then publish three more values below 60, the rule (if re-evaluated) should no longer trigger for this condition.
+
+**B. Testing with `time_window`-based aggregation**
+
+**Test Case B1: `avg` temperature over a time window.**
+1.  **Publish Sensor Data:**
+    -   For topic `Invernadero/TemHum1/data` (target `source_id: "temhum1"`, `metric: "temperatura"`):
+        -   At T-4 minutes (from now): Publish `{"temperatura": 20}`
+        -   At T-3 minutes: Publish `{"temperatura": 20}`
+        -   At T-2 minutes: Publish `{"temperatura": 20}`
+        -   At T-1 minute: Publish `{"temperatura": 30}`
+        -   At T-0 minutes (now): Publish `{"temperatura": 30}`
+        *(Ensure `mqttService.js` adds these to `sensor_history:temhum1:temperatura` with their timestamps)*
+2.  **Rule Definition (Average > 28 over last 2 minutes):**
+    -   Create/update a rule:
+        ```json
+        {
+          "name": "High Avg Temp Last 2 Min",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum1", "metric": "temperatura",
+            "aggregator": "avg", "time_window": "2m", "operator": ">", "value": 28
+          },
+          "actions": [ { "service": "deviceService", "method": "updateDeviceStatus", "target_device_id": "fan_hw_id", "params": {"status": "on"} } ]
+        }
+        ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   The "fan_hw_id" device should turn ON. (The average of values [30, 30] from the last 2 minutes is 30, which is > 28).
+    -   Check `operations_log` for rule trigger.
+4.  **Rule Definition (Average > 23 over last 5 minutes):**
+    -   Update the rule's `time_window` to `"5m"` and `value` to `23`.
+        ```json
+        { // ... same name/actions ...
+           "conditions": {
+               "source_type": "sensor_history", "source_id": "temhum1", "metric": "temperatura",
+               "aggregator": "avg", "time_window": "5m", "operator": ">", "value": 23
+           }
+        }
+        ```
+5.  **Execution & Verification (after rule evaluation cycle):**
+    -   The "fan_hw_id" device should remain ON (or turn ON if previously off). (The average of [20, 20, 20, 30, 30] from the last 5 minutes is 24, which is > 23).
+6.  **Test Non-Trigger (Average < 23 over last 5 minutes):**
+    -   Update rule: `operator: "<"`, `value: 23`.
+    -   Verify: Fan should NOT be triggered by this rule for an ON action.
+
+**Test Case B2: `min` power over a time window.**
+1.  **Publish Sensor Data:**
+    -   For topic `Invernadero/PS001/data` (target `source_id: "power:PS001"`, `metric: "power"`). Note: `mqttService` needs to be configured to handle `power:PS001` as a valid `source_id` for history.
+        -   At T-30 seconds: Publish `{"power": 100}`
+        -   At T-20 seconds: Publish `{"power": 50}`
+        -   At T-10 seconds: Publish `{"power": 120}`
+2.  **Rule Definition (Min power < 60W over last 1 minute):**
+    -   Create a rule:
+        ```json
+        {
+          "name": "Low Power Alert Last Min",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "power:PS001", "metric": "power",
+            "aggregator": "min", "time_window": "1m", "operator": "<", "value": 60
+          },
+          "actions": [ { "service": "operationService", "method": "recordOperation", "params": {"serviceName": "RulesEngine", "action": "AlertLowPower", "status": "ALERT", "details": {"message": "Minimum power was below 60W in the last minute."}}} ]
+        }
+        ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   An operation log with `action: "AlertLowPower"` should be created. (The minimum of [100, 50, 120] in the last minute is 50, which is < 60).
+
+**Test Case B3: Empty/Insufficient Data in Window**
+1.  **Setup:** Ensure no data has been published for a specific sensor metric (e.g., `sensor_history:temhum2:temperatura`) within the last 5 minutes. You can achieve this by not publishing or by waiting long enough.
+2.  **Rule Definition:**
+    ```json
+    {
+        "name": "Temp Avg With No Recent Data",
+        "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum2", "metric": "temperatura",
+            "aggregator": "avg", "time_window": "1m", "operator": ">", "value": 0
+        },
+        "actions": [ /* ... some action that is clearly observable ... */ ]
+    }
+    ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   The rule should NOT trigger its action.
+    -   Check debug logs for messages like "no relevant numeric values for aggregation" or "no history data found" for `sensor_history:temhum2:temperatura`.
+
+**Test Case B4: `max` and `sum` aggregators (Brief)**
+-   **`max`:** Publish values like [10, 50, 20] within a `time_window` (e.g., "1m"). Create a rule with `aggregator: "max"`, `operator: "==", value: 50`. Verify it triggers.
+-   **`sum`:** Publish values like [10, 20, 30] within a `time_window`. Create a rule with `aggregator: "sum"`, `operator: "==", value: 60`. Verify it triggers.
+
 ## Database Schema Overview
 
 This section provides a brief overview of key database tables.
@@ -459,6 +922,18 @@ This section provides a brief overview of key database tables.
 ### `rules` Table
 - Stores definitions for the rules engine. See "Rules Engine" section for details on `conditions` and `actions`.
 
+## Background Services and Workers
+
+This section describes background processes that run as part of the application.
+
+### Critical Action Worker
+
+The Critical Action Worker (`workers/criticalActionWorker.js`) is responsible for processing actions from a Redis Stream (`CRITICAL_ACTIONS_STREAM_NAME`). These actions are typically queued by other services (like the Rules Engine or Scheduler Service) and involve operations like updating device statuses or configurations.
+
+-   **Retry Mechanism:** If an action fails, the worker will retry it up to `CRITICAL_WORKER_MAX_RETRIES` times, with a delay of `CRITICAL_WORKER_RETRY_DELAY_MS` between attempts.
+-   **Dead-Letter Queue (DLQ):** If an action fails all retry attempts, it is moved to a Dead-Letter Queue (`CRITICAL_ACTIONS_DLQ_STREAM_NAME`) for later inspection and potential manual retry or deletion via the System Administration API endpoints.
+-   **DLQ Growth Alerting:** The Critical Action Worker periodically monitors the size of the DLQ. If the number of messages in the DLQ exceeds `DLQ_ALERT_THRESHOLD`, an error is logged to the main application logs, and an 'ALERT' operation (`dlq_threshold_exceeded`) is recorded in the `operations_log` table. This check occurs every `DLQ_CHECK_INTERVAL_MINUTES`. This feature helps administrators identify persistent issues with action processing or an accumulation of failed tasks.
+
 ## Environment Variables
 
 This application requires certain environment variables to be set in a `.env` file in the project root.
@@ -472,22 +947,10 @@ This application requires certain environment variables to be set in a `.env` fi
 -   `MQTT_PASSWORD`: (Optional) Password for MQTT broker authentication.
 
 The application is configured to subscribe to topics under the root `Invernadero/#`. Specific sub-topics and their expected payloads are:
-
--   **Temperature & Humidity Sensors (e.g., TemHum1, TemHum2):**
-    -   Topic: `Invernadero/<DeviceGroupID>/data` (e.g., `Invernadero/TemHum1/data`)
-    -   Payload (JSON): Contains fields like `temperatura`, `humedad`, and a nested `stats` object. (Refer to `services/mqttService.js` for full structure).
--   **Water Quality Sensors (Agua):**
-    -   Topic: `Invernadero/Agua/data`
-    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temp": <number_optional>}` (Note: `temp` is for water temperature if sent in this payload)
-    -   Topic: `Invernadero/Agua/Temperatura`
-    -   Payload (Text): Plain text number representing water temperature.
--   **Power Monitoring Sensors:**
-    -   Topic: `Invernadero/<PowerSensorDeviceID>/data` (where `<PowerSensorDeviceID>` is the `device_id` of a device of type `power_sensor`).
-    -   Payload (JSON): `{"voltage": <number>, "current": <number>, "power": <number>, "sensor_timestamp": "<ISO8601_string_optional>"}`.
-        The `power` field is expected to be pre-calculated by the device. `sensor_timestamp` is an optional timestamp from the sensor itself.
+(Details as previously verified)
+...
 
 Example `.env` entries:
-
 ```
 MQTT_BROKER_URL=mqtt://broker.emqx.io:1883
 # MQTT_USERNAME=your_username
@@ -513,4 +976,15 @@ Refer to the EMQX documentation for connection details: [https://docs.emqx.com/e
 -   `REDIS_PORT`: Port for your Redis server.
 -   `REDIS_PASSWORD`: (Optional) Password for Redis authentication.
 -   `REDIS_USER`: (Optional) Username for Redis authentication (if using Redis ACLs).
+
+### Critical Action Worker & DLQ Configuration
+
+-   `CRITICAL_ACTIONS_STREAM_NAME`: Name of the main Redis Stream for critical actions (Default: `critical_actions_stream`).
+-   `CRITICAL_ACTIONS_STREAM_MAXLEN`: Approximate maximum length for the main actions stream (Default: `10000`).
+-   `CRITICAL_WORKER_MAX_RETRIES`: Number of times the worker will retry a failed action (Default: `3`).
+-   `CRITICAL_WORKER_RETRY_DELAY_MS`: Delay in milliseconds between retries (Default: `1000`).
+-   `CRITICAL_ACTIONS_DLQ_STREAM_NAME`: Name of the Redis Stream for the Dead-Letter Queue (Default: `critical_actions_dlq`). This is used by the worker for publishing failed messages and by the `queueService` for DLQ management.
+-   `CRITICAL_ACTIONS_DLQ_MAXLEN`: Approximate maximum length for the DLQ stream (Default: `1000`).
+-   `DLQ_ALERT_THRESHOLD`: Threshold for DLQ size. If the number of messages in `CRITICAL_ACTIONS_DLQ_STREAM_NAME` exceeds this, an alert is logged by the Critical Action Worker. (Default: `10`).
+-   `DLQ_CHECK_INTERVAL_MINUTES`: How often (in minutes) the Critical Action Worker checks the DLQ size. (Default: `5`). A value of `0` disables the check.
 ```

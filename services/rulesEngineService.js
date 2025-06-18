@@ -5,8 +5,27 @@ const redisClient = require('../config/redis');
 const operationService = require('./operationService');
 const { publishCriticalAction } = require('./queueService');
 
+// Define SENSOR_HISTORY_MAX_LENGTH, mirroring the value in mqttService.js
+// TODO: Consider moving this to a shared config or environment variable
+const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH, 10) || 100;
+
 let rulesEngineJob;
 let _broadcastWebSocket = null; // For dependency injection
+
+// Helper function to parse duration strings (e.g., "5m", "1h") into milliseconds
+function parseDurationToMs(durationStr) {
+  if (typeof durationStr !== 'string') return null;
+  const match = durationStr.match(/^(\d+)([smh])$/);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 's': return value * 1000;
+    case 'm': return value * 60 * 1000;
+    case 'h': return value * 3600 * 1000;
+    default: return null;
+  }
+}
 
 function initRulesEngineService(dependencies) {
   if (dependencies && dependencies.broadcastWebSocket) {
@@ -136,58 +155,98 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
     }
   } else if (clause.source_type === 'sensor_history') {
-    if (!clause.source_id || !clause.metric || !clause.aggregator || !clause.samples || !clause.operator || clause.value === undefined) {
-      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause missing required fields. Clause: %j`, clause);
-      return false;
-    }
-    const samplesToFetch = parseInt(clause.samples, 10);
-    if (isNaN(samplesToFetch) || samplesToFetch <= 0) {
-      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause 'samples' is not a valid positive integer. Clause: %j`, clause);
+    // Validate common fields: source_id, metric, aggregator, operator, value
+    if (!clause.source_id || !clause.metric || !clause.aggregator || !clause.operator || clause.value === undefined) {
+      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause missing common required fields. Clause:`, clause);
       return false;
     }
 
     const listKey = `sensor_history:${clause.source_id}:${clause.metric}`;
     let aggregatedValue;
+    let relevantNumericValues = [];
 
     try {
-      const rawSamples = await redisClient.lrange(listKey, 0, samplesToFetch - 1);
-      if (!rawSamples || rawSamples.length === 0) {
-        logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey}.`);
+      if (clause.time_window && typeof clause.time_window === 'string') {
+        const durationMs = parseDurationToMs(clause.time_window);
+        if (durationMs === null || durationMs <= 0) {
+          logger.warn(`RulesEngine: Rule ${ruleId}, invalid time_window format or value '${clause.time_window}'. Clause:`, clause);
+          return false;
+        }
+        const windowStartTimeEpochMs = Date.now() - durationMs;
+
+        // Fetch up to SENSOR_HISTORY_MAX_LENGTH items. Filtering by time happens next.
+        const rawSamples = await redisClient.lrange(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1);
+        if (!rawSamples || rawSamples.length === 0) {
+          logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey} for time_window.`);
+          return false;
+        }
+
+        relevantNumericValues = rawSamples.map(s => {
+          try {
+            const point = JSON.parse(s); // Expects { ts: ISO_string, val: number_or_string }
+            if (point && point.ts && new Date(point.ts).getTime() >= windowStartTimeEpochMs) {
+              return parseFloat(point.val);
+            }
+            return NaN;
+          } catch (e) {
+            logger.warn(`RulesEngine: Rule ${ruleId}, error parsing historical data point '${s}' from ${listKey}: ${e.message}`);
+            return NaN;
+          }
+        }).filter(v => !isNaN(v));
+        logger.debug(`RulesEngine: Rule ${ruleId}, ${listKey} (time_window: ${clause.time_window}) - found ${relevantNumericValues.length} values in window from ${rawSamples.length} raw samples.`);
+
+      } else if (clause.samples) {
+        const samplesToFetch = parseInt(clause.samples, 10);
+        if (isNaN(samplesToFetch) || samplesToFetch <= 0) {
+          logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause 'samples' is not a valid positive integer. Clause:`, clause);
+          return false;
+        }
+        const rawSamples = await redisClient.lrange(listKey, 0, samplesToFetch - 1);
+        if (!rawSamples || rawSamples.length === 0) {
+          logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey} for samples.`);
+          return false;
+        }
+        relevantNumericValues = rawSamples.map(s => {
+            try { return parseFloat(JSON.parse(s).val); }
+            catch(e) {
+                logger.warn(`RulesEngine: Rule ${ruleId}, error parsing historical sample data point '${s}' from ${listKey}: ${e.message}`);
+                return NaN;
+            }
+        }).filter(v => !isNaN(v));
+        logger.debug(`RulesEngine: Rule ${ruleId}, ${listKey} (samples: ${clause.samples}) - found ${relevantNumericValues.length} valid values from ${rawSamples.length} raw samples.`);
+      } else {
+        logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause must have 'time_window' or 'samples'. Clause:`, clause);
         return false;
       }
 
-      const numericValues = rawSamples.map(s => {
-        try { return parseFloat(JSON.parse(s).val); }
-        catch (e) { logger.warn(`RulesEngine: Rule ${ruleId}, error parsing historical data point '${s}' from ${listKey}: ${e.message}`); return NaN; }
-      }).filter(v => !isNaN(v));
-
-      if (numericValues.length === 0) {
-        logger.debug(`RulesEngine: Rule ${ruleId}, no valid numeric values in historical data for ${listKey}. Found: ${numericValues.length}`);
+      if (relevantNumericValues.length === 0) {
+        logger.debug(`RulesEngine: Rule ${ruleId}, no relevant numeric values for aggregation for ${listKey} after filtering/parsing.`);
         return false;
       }
 
-      logger.debug(`RulesEngine: Rule ${ruleId}, evaluating ${listKey} with ${numericValues.length} values for aggregator ${clause.aggregator}: %j`, numericValues);
-
+      // Apply Aggregator (common for both time_window and samples)
       switch (clause.aggregator.toLowerCase()) {
-        case 'avg': aggregatedValue = numericValues.reduce((sum, val) => sum + val, 0) / numericValues.length; break;
-        case 'min': aggregatedValue = Math.min(...numericValues); break;
-        case 'max': aggregatedValue = Math.max(...numericValues); break;
-        case 'sum': aggregatedValue = numericValues.reduce((sum, val) => sum + val, 0); break;
-        default: logger.warn(`RulesEngine: Rule ${ruleId}, unsupported aggregator '${clause.aggregator}'. Clause: %j`, clause); return false;
+        case 'avg': aggregatedValue = relevantNumericValues.reduce((sum, val) => sum + val, 0) / relevantNumericValues.length; break;
+        case 'min': aggregatedValue = Math.min(...relevantNumericValues); break;
+        case 'max': aggregatedValue = Math.max(...relevantNumericValues); break;
+        case 'sum': aggregatedValue = relevantNumericValues.reduce((sum, val) => sum + val, 0); break;
+        default:
+          logger.warn(`RulesEngine: Rule ${ruleId}, unsupported aggregator '${clause.aggregator}'. Clause:`, clause);
+          return false;
       }
 
       if (aggregatedValue === undefined || isNaN(aggregatedValue)) {
-          logger.warn(`RulesEngine: Rule ${ruleId}, aggregatedValue is undefined or NaN for ${listKey}. Aggregator: ${clause.aggregator}`);
+          logger.warn(`RulesEngine: Rule ${ruleId}, aggregatedValue is undefined or NaN for ${listKey}. Aggregator: ${clause.aggregator}, Values: %j`, relevantNumericValues);
           return false;
       }
 
       const expectedValueNum = parseFloat(clause.value);
       if (isNaN(expectedValueNum)) {
-        logger.warn(`RulesEngine: Rule ${ruleId}, expected value '${clause.value}' in sensor_history clause is not a number. Clause: %j`, clause);
+        logger.warn(`RulesEngine: Rule ${ruleId}, expected value '${clause.value}' in sensor_history clause is not a number. Clause:`, clause);
         return false;
       }
 
-      logger.debug(`RulesEngine: SensorHistory Eval for rule ${ruleId}: ${clause.source_id}.${clause.metric} (agg: ${clause.aggregator}, ${numericValues.length} samples) = ${aggregatedValue}, rule expects ${clause.operator} ${expectedValueNum}`);
+      logger.debug(`RulesEngine: SensorHistory Eval for rule ${ruleId}: ${clause.source_id}.${clause.metric} (agg: ${clause.aggregator}) = ${aggregatedValue}, rule expects ${clause.operator} ${expectedValueNum}`);
 
       switch (clause.operator) {
         case '>': return aggregatedValue > expectedValueNum;
@@ -196,14 +255,17 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         case '<=': return aggregatedValue <= expectedValueNum;
         case '==': case '===': return aggregatedValue === expectedValueNum;
         case '!=': case '!==': return aggregatedValue !== expectedValueNum;
-        default: logger.warn(`RulesEngine: Rule ${ruleId}, unsupported operator '${clause.operator}'. Clause: %j`, clause); return false;
+        default:
+          logger.warn(`RulesEngine: Rule ${ruleId}, unsupported operator '${clause.operator}' in sensor_history. Clause:`, clause);
+          return false;
       }
+
     } catch (error) {
-      logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_history for ${listKey}: ${error.message}`, { stack: error.stack });
+      logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_history clause for ${listKey}: ${error.message}`, { stack: error.stack, clause });
       return false;
     }
   } else {
-    logger.warn(`RulesEngine: Unknown or unsupported clause source_type '${clause.source_type}' or missing fields in rule ${ruleId}: %j`, clause);
+    logger.warn(`RulesEngine: Unknown or unsupported clause source_type '${clause.source_type}' or missing fields in rule ${ruleId}:`, clause);
     return false;
   }
 }
