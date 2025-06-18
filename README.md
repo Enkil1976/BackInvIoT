@@ -655,6 +655,50 @@ You can restrict rules to specific times or days. All times and datetimes are pr
     { "source_type": "time", "condition_type": "datetime_range", "after_datetime": "2025-01-01T00:00:00Z", "before_datetime": "2025-01-31T23:59:59Z" }
     ```
 
+**Sensor History Conditions (`sensor_history`)**
+Evaluates a condition based on an aggregation of recent historical readings for a specific sensor metric. Uses data stored in Redis lists by `mqttService.js` (e.g., `sensor_history:temhum1:temperatura`).
+
+- `source_type: "sensor_history"`
+- `source_id: "<sensor_identifier_for_redis_key_base>"` (e.g., "temhum1", "calidad_agua", "power:PS001") - This is the base part of the Redis list key.
+- `metric: "<metric_name>"` (e.g., "temperatura", "voltage", "ph") - This is appended to `source_id` to form the full list key.
+- `aggregator: "avg" | "min" | "max" | "sum"` (Required - The aggregation function to apply to the historical values).
+- `operator: ">" | "<" | ">=" | "<=" | "==" | "!="` (Required - Comparison operator).
+- `value: <number>` (Required - The value to compare the aggregated result against).
+
+You must specify **either** `time_window` (to aggregate over a duration) **or** `samples` (to aggregate over a fixed number of recent readings). If both are provided, `time_window` will take precedence.
+
+-   **`time_window: "<duration_string>"`** (Optional, use if not using `samples`)
+    -   Specifies the duration of recent history to consider, relative to the current time. Data points within this duration (from their `ts` field) will be included in the aggregation.
+    -   Format: A string with a number followed by 's' (seconds), 'm' (minutes), or 'h' (hours).
+    -   Examples: `"30s"`, `"5m"`, `"2h"`.
+    -   *Example Clause (Average temperature over the last 10 minutes):*
+        ```json
+        {
+          "source_type": "sensor_history",
+          "source_id": "temhum1",
+          "metric": "temperatura",
+          "aggregator": "avg",
+          "time_window": "10m",
+          "operator": ">",
+          "value": 22
+        }
+        ```
+
+-   **`samples: <number>`** (Optional, use if not using `time_window`)
+    -   Number of the most recent samples to retrieve from the history list and aggregate.
+    -   *Example Clause (Maximum pH value from the last 5 samples):*
+        ```json
+        {
+          "source_type": "sensor_history",
+          "source_id": "calidad_agua",
+          "metric": "ph",
+          "aggregator": "max",
+          "samples": 5,
+          "operator": "<=",
+          "value": 7.5
+        }
+        ```
+
 **Combining Conditions Example:**
 Activate a fan if office temperature (from sensor `office_temp_hw_id` via Redis key `sensor_latest:office_temp_hw_id`) is above 25 AND it's a weekday between 9 AM and 5 PM UTC.
 ```json
@@ -747,6 +791,115 @@ This section provides guidance on how to manually test the rules engine.
 -   For each test, after the expected evaluation time of the Rules Engine (e.g., every 30 seconds), check the `operations_log` for `rule_triggered` events (or lack thereof) and any action-specific logs.
 -   Monitor WebSocket messages for `rule_triggered` events if this is implemented.
 -   Check the `last_triggered_at` field of the rule being tested via `GET /api/rules/:id` to confirm if it was updated (or not).
+
+##### Testing Sensor History Conditions (`sensor_history`)
+
+These tests verify conditions based on aggregations of recent sensor readings from Redis Lists.
+
+**Prerequisites for Sensor History Testing:**
+-   Ensure `mqttService.js` is operational and correctly configured to push historical data for the relevant sensors to Redis Lists. For example, data for `temhum1`'s `temperatura` should be in `sensor_history:temhum1:temperatura`.
+-   You need a method to publish MQTT messages for the sensor and metric you intend to test (e.g., using an MQTT client tool). This allows you to populate the Redis history list with known values and timestamps.
+-   Verify that `SENSOR_HISTORY_MAX_LENGTH` (default 100 in `mqttService.js` and `rulesEngineService.js`) is adequate for your test scenarios, or be mindful of this limit. Data points older than this many entries might be trimmed from the list.
+
+**A. Testing with `samples`-based aggregation (Briefly)**
+-   **Scenario:** Trigger a rule if the average of the last 3 humidity readings for `temhum1` is above 60%.
+    1.  **Publish Data:** Publish 4+ MQTT messages to `Invernadero/TemHum1/data` with varying `humedad` values, ensuring the last 3 average above 60% (e.g., 50, 65, 70, 75 - last three are 65,70,75).
+    2.  **Rule Definition:**
+        ```json
+        {
+          "name": "High Avg Humidity Last 3 Samples",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum1", "metric": "humedad",
+            "aggregator": "avg", "samples": 3, "operator": ">", "value": 60
+          },
+          "actions": [ /* ... some action ... */ ]
+        }
+        ```
+    3.  **Verify:** The rule should trigger. If you then publish three more values below 60, the rule (if re-evaluated) should no longer trigger for this condition.
+
+**B. Testing with `time_window`-based aggregation**
+
+**Test Case B1: `avg` temperature over a time window.**
+1.  **Publish Sensor Data:**
+    -   For topic `Invernadero/TemHum1/data` (target `source_id: "temhum1"`, `metric: "temperatura"`):
+        -   At T-4 minutes (from now): Publish `{"temperatura": 20}`
+        -   At T-3 minutes: Publish `{"temperatura": 20}`
+        -   At T-2 minutes: Publish `{"temperatura": 20}`
+        -   At T-1 minute: Publish `{"temperatura": 30}`
+        -   At T-0 minutes (now): Publish `{"temperatura": 30}`
+        *(Ensure `mqttService.js` adds these to `sensor_history:temhum1:temperatura` with their timestamps)*
+2.  **Rule Definition (Average > 28 over last 2 minutes):**
+    -   Create/update a rule:
+        ```json
+        {
+          "name": "High Avg Temp Last 2 Min",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum1", "metric": "temperatura",
+            "aggregator": "avg", "time_window": "2m", "operator": ">", "value": 28
+          },
+          "actions": [ { "service": "deviceService", "method": "updateDeviceStatus", "target_device_id": "fan_hw_id", "params": {"status": "on"} } ]
+        }
+        ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   The "fan_hw_id" device should turn ON. (The average of values [30, 30] from the last 2 minutes is 30, which is > 28).
+    -   Check `operations_log` for rule trigger.
+4.  **Rule Definition (Average > 23 over last 5 minutes):**
+    -   Update the rule's `time_window` to `"5m"` and `value` to `23`.
+        ```json
+        { // ... same name/actions ...
+           "conditions": {
+               "source_type": "sensor_history", "source_id": "temhum1", "metric": "temperatura",
+               "aggregator": "avg", "time_window": "5m", "operator": ">", "value": 23
+           }
+        }
+        ```
+5.  **Execution & Verification (after rule evaluation cycle):**
+    -   The "fan_hw_id" device should remain ON (or turn ON if previously off). (The average of [20, 20, 20, 30, 30] from the last 5 minutes is 24, which is > 23).
+6.  **Test Non-Trigger (Average < 23 over last 5 minutes):**
+    -   Update rule: `operator: "<"`, `value: 23`.
+    -   Verify: Fan should NOT be triggered by this rule for an ON action.
+
+**Test Case B2: `min` power over a time window.**
+1.  **Publish Sensor Data:**
+    -   For topic `Invernadero/PS001/data` (target `source_id: "power:PS001"`, `metric: "power"`). Note: `mqttService` needs to be configured to handle `power:PS001` as a valid `source_id` for history.
+        -   At T-30 seconds: Publish `{"power": 100}`
+        -   At T-20 seconds: Publish `{"power": 50}`
+        -   At T-10 seconds: Publish `{"power": 120}`
+2.  **Rule Definition (Min power < 60W over last 1 minute):**
+    -   Create a rule:
+        ```json
+        {
+          "name": "Low Power Alert Last Min",
+          "conditions": {
+            "source_type": "sensor_history", "source_id": "power:PS001", "metric": "power",
+            "aggregator": "min", "time_window": "1m", "operator": "<", "value": 60
+          },
+          "actions": [ { "service": "operationService", "method": "recordOperation", "params": {"serviceName": "RulesEngine", "action": "AlertLowPower", "status": "ALERT", "details": {"message": "Minimum power was below 60W in the last minute."}}} ]
+        }
+        ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   An operation log with `action: "AlertLowPower"` should be created. (The minimum of [100, 50, 120] in the last minute is 50, which is < 60).
+
+**Test Case B3: Empty/Insufficient Data in Window**
+1.  **Setup:** Ensure no data has been published for a specific sensor metric (e.g., `sensor_history:temhum2:temperatura`) within the last 5 minutes. You can achieve this by not publishing or by waiting long enough.
+2.  **Rule Definition:**
+    ```json
+    {
+        "name": "Temp Avg With No Recent Data",
+        "conditions": {
+            "source_type": "sensor_history", "source_id": "temhum2", "metric": "temperatura",
+            "aggregator": "avg", "time_window": "1m", "operator": ">", "value": 0
+        },
+        "actions": [ /* ... some action that is clearly observable ... */ ]
+    }
+    ```
+3.  **Execution & Verification (after rule evaluation cycle):**
+    -   The rule should NOT trigger its action.
+    -   Check debug logs for messages like "no relevant numeric values for aggregation" or "no history data found" for `sensor_history:temhum2:temperatura`.
+
+**Test Case B4: `max` and `sum` aggregators (Brief)**
+-   **`max`:** Publish values like [10, 50, 20] within a `time_window` (e.g., "1m"). Create a rule with `aggregator: "max"`, `operator: "==", value: 50`. Verify it triggers.
+-   **`sum`:** Publish values like [10, 20, 30] within a `time_window`. Create a rule with `aggregator: "sum"`, `operator: "==", value: 60`. Verify it triggers.
 
 ## Database Schema Overview
 
