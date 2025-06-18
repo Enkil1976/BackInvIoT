@@ -135,6 +135,118 @@ This section details other API endpoints available in the application.
   - `400 Bad Request`: If `id` is invalid or other parameters are malformed.
   - `404 Not Found`: If device with `id` does not exist.
 
+### Schedule Service API Endpoints
+
+The Schedule Service API allows for creating, managing, and retrieving scheduled operations for devices.
+
+**Note on Conflict Detection:** When creating or updating schedules, the system performs a basic conflict check. It verifies if the proposed schedule's next execution time (or the next few for cron jobs) would exactly match another existing enabled schedule for the same device. If a conflict is detected, a `409 Conflict` error is returned. This check helps prevent duplicate executions but does not account for the duration of actions.
+
+#### `POST /api/scheduled-operations`
+Creates a new scheduled operation.
+-   **Authentication:** Required (e.g., admin, editor roles).
+-   **Request Body:**
+    ```json
+    {
+      "device_id": 123, // Required: Database ID of the target device
+      "action_name": "set_status", // Required: Name of the action to perform
+      "action_params": {"status": "on"}, // Required: Parameters for the action
+      "cron_expression": "0 * * * *", // Optional: For recurring tasks
+      "execute_at": "2024-12-31T23:59:00Z", // Optional: For one-time tasks (either this or cron_expression is required)
+      "is_enabled": true, // Optional: Defaults to true
+      "description": "Turn on device every hour" // Optional
+    }
+    ```
+-   **Success Response (201 Created):** The created scheduled operation object.
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid input data (e.g., missing required fields, invalid cron expression, invalid `execute_at` date).
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have permission.
+    -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and a limited number of near-future occurrences (e.g., next 5) for cron-based schedules.
+    -   `500 Internal Server Error`: Server-side error.
+
+#### `PUT /api/scheduled-operations/:id`
+Updates an existing scheduled operation.
+-   **Authentication:** Required (e.g., admin, editor roles).
+-   **Path Parameters:**
+    -   `id` (integer, required): The ID of the scheduled operation to update.
+-   **Request Body:** An object containing fields to update (e.g., `action_params`, `cron_expression`, `execute_at`, `is_enabled`, `description`).
+-   **Success Response (200 OK):** The updated scheduled operation object.
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid input data.
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have permission.
+    -   `404 Not Found`: Scheduled operation with the given `id` not found.
+    -   `409 Conflict`: Returned if the updated schedule's execution time(s) directly clash with another existing enabled schedule for the same device (excluding itself). The conflict detection logic is similar to the POST endpoint.
+    -   `500 Internal Server Error`: Server-side error.
+
+#### Manual Testing Guidelines for Schedule Conflict Validation
+
+These tests verify that the system prevents the creation or update of schedules that would conflict with existing enabled schedules for the same device based on their next execution times.
+
+**Prerequisites:**
+-   An authenticated user with permissions to create/update schedules (e.g., 'admin' or 'editor').
+-   At least one or two devices registered in the system (e.g., `device_id_A_db_id`, `device_id_B_db_id`). Obtain their database IDs for use in API calls.
+
+**Test Case 1: Conflict - Creating a new one-time schedule that clashes with an existing one-time schedule.**
+1.  **Create Schedule 1 (One-Time):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "on"}, "execute_at": "YYYY-MM-DDTHH:MM:00Z" }` (Choose a specific future UTC time, e.g., two hours from now).
+    -   Verify: 201 Created. Note the `id` of this schedule.
+2.  **Attempt to Create Schedule 2 (Conflicting One-Time):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "off"}, "execute_at": "YYYY-MM-DDTHH:MM:00Z" }` (Use the *exact same* `device_id` and `execute_at` as Schedule 1).
+    -   Verify: **409 Conflict** HTTP status code. The response body should indicate a conflict.
+3.  **Attempt to Create Schedule 3 (Non-Conflicting - Different Device):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_B_db_id>, "action_name": "set_status", "action_params": {"status": "off"}, "execute_at": "YYYY-MM-DDTHH:MM:00Z" }` (Use a *different device ID* but same time as Schedule 1).
+    -   Verify: 201 Created (assuming `device_id_B_db_id` exists).
+4.  **Attempt to Create Schedule 4 (Non-Conflicting - Different Time):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "off"}, "execute_at": "YYYY-MM-DDTHH:MM+1M:00Z" }` (Use same device ID as Schedule 1, but a slightly different future time, e.g., one minute later).
+    -   Verify: 201 Created.
+
+**Test Case 2: Conflict - Creating a new cron schedule that clashes with an existing one-time schedule's next run.**
+1.  Ensure Schedule 1 from Test Case 1 exists, is enabled, and its `execute_at` is "YYYY-MM-DDTHH:MM:00Z".
+2.  **Attempt to Create Schedule 5 (Conflicting Cron):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "aux_on"}, "cron_expression": "<cron_that_triggers_at_Schedule1_execute_at_time>" }`
+        (e.g., if Schedule 1 is at 14:30:00 UTC, use a cron like `30 14 * * *`).
+    -   Verify: **409 Conflict**.
+    -   *(Note: This depends on `MAX_CRON_OCCURRENCES_TO_CHECK` being sufficient if the cron's first matching time is not immediate but within those checks).*
+
+**Test Case 3: Conflict - Updating a schedule to clash with another existing schedule.**
+1.  **Create Schedule 6 (One-Time, distinct time):**
+    -   `POST /api/scheduled-operations`
+    -   Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "X"}, "execute_at": "YYYY-MM-DDTHH+1H:MM:00Z" }` (A distinct future UTC time, e.g., one hour after Schedule 1).
+    -   Verify: 201 Created. Note its `id` (e.g., `schedule_6_id`).
+2.  Ensure Schedule 1 (from Test Case 1, with `execute_at = YYYY-MM-DDTHH:MM:00Z`) still exists and is enabled.
+3.  **Attempt to Update Schedule 6 to conflict with Schedule 1:**
+    -   `PUT /api/scheduled-operations/<schedule_6_id>`
+    -   Body: `{ "execute_at": "YYYY-MM-DDTHH:MM:00Z" }` (Change Schedule 6's time to match Schedule 1's time).
+    -   Verify: **409 Conflict**.
+4.  **Update Schedule 6 to a non-conflicting time:**
+    -    `PUT /api/scheduled-operations/<schedule_6_id>`
+    -    Body: `{ "execute_at": "YYYY-MM-DDTHH+2H:MM:00Z" }` (Another distinct future time).
+    -    Verify: 200 OK.
+
+**Test Case 4: No Conflict - Updating a schedule's non-timing attributes.**
+1.  Ensure Schedule 1 exists.
+2.  **Update Schedule 1's action_params (no time change):**
+    -   `PUT /api/scheduled-operations/<id_of_schedule_1>`
+    -   Body: `{ "action_params": {"status": "on_updated"} }`
+    -   Verify: 200 OK. (Conflict check should pass as `next_execution_at` for this schedule does not change relative to others, or if it does due to re-calc, it doesn't clash).
+
+**Test Case 5: No Conflict - Disabled schedules.**
+1. Ensure Schedule 1 exists and is enabled (at "YYYY-MM-DDTHH:MM:00Z").
+2. **Create Schedule 7 (One-Time, conflicting time with Schedule 1, but initially disabled):**
+    - `POST /api/scheduled-operations`
+    - Body: `{ "device_id": <device_id_A_db_id>, "action_name": "set_status", "action_params": {"status": "Z"}, "execute_at": "YYYY-MM-DDTHH:MM:00Z", "is_enabled": false }`
+    - Verify: 201 Created (No conflict because it's disabled). Note its `id` (e.g., `schedule_7_id`).
+3. **Attempt to enable Schedule 7 (which would then conflict):**
+    - `PUT /api/scheduled-operations/<schedule_7_id>`
+    - Body: `{ "is_enabled": true }`
+    - Verify: **409 Conflict**.
+
 ## Device Management
 
 ### Device Types and Configuration
@@ -267,9 +379,9 @@ The `actions` field is an array of action objects to be executed if conditions a
 
 ### Manual Testing Guidelines for Rules
 
-This section provides guidance on how to manually test the rules engine, especially focusing on different condition types.
+This section provides guidance on how to manually test the rules engine.
 
-#### Prerequisites for Testing Rules
+#### General Prerequisites for Testing Rules
 *   Ensure the Rules Engine (`services/rulesEngineService.js`) is running (it's started by `server.js`).
 *   You have API access to create, update, and view rules (e.g., via `POST /api/rules`, `PUT /api/rules/:id`, `GET /api/rules/:id`).
 *   You can observe the results of rule actions. This might involve:
@@ -366,7 +478,7 @@ The application is configured to subscribe to topics under the root `Invernadero
     -   Payload (JSON): Contains fields like `temperatura`, `humedad`, and a nested `stats` object. (Refer to `services/mqttService.js` for full structure).
 -   **Water Quality Sensors (Agua):**
     -   Topic: `Invernadero/Agua/data`
-    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temperatura_agua": <number_optional>}`
+    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temp": <number_optional>}` (Note: `temp` is for water temperature if sent in this payload)
     -   Topic: `Invernadero/Agua/Temperatura`
     -   Payload (Text): Plain text number representing water temperature.
 -   **Power Monitoring Sensors:**
