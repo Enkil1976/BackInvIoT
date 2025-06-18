@@ -161,7 +161,7 @@ Creates a new scheduled operation.
     -   `400 Bad Request`: Invalid input data (e.g., missing required fields, invalid cron expression, invalid `execute_at` date).
     -   `401 Unauthorized`: Missing or invalid JWT.
     -   `403 Forbidden`: User does not have permission.
-    -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and a limited number of near-future occurrences (e.g., next 5) for cron-based schedules.
+    -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and the next few occurrences (e.g., next 5 or within a 48-hour window) for cron-based schedules. (This does not yet account for action durations).
     -   `500 Internal Server Error`: Server-side error.
 
 #### `PUT /api/scheduled-operations/:id`
@@ -176,7 +176,7 @@ Updates an existing scheduled operation.
     -   `401 Unauthorized`: Missing or invalid JWT.
     -   `403 Forbidden`: User does not have permission.
     -   `404 Not Found`: Scheduled operation with the given `id` not found.
-    -   `409 Conflict`: Returned if the updated schedule's execution time(s) directly clash with another existing enabled schedule for the same device (excluding itself). The conflict detection logic is similar to the POST endpoint.
+    -   `409 Conflict`: Returned if the updated schedule's execution time(s) directly clash with another existing enabled schedule for the same device (excluding itself). The system checks for exact time matches, considering the next execution for one-time tasks and the next few occurrences (e.g., next 5 or within a 48-hour window) for cron-based schedules. (This does not yet account for action durations).
     -   `500 Internal Server Error`: Server-side error.
 
 #### Manual Testing Guidelines for Schedule Conflict Validation
