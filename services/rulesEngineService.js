@@ -56,7 +56,22 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
        return false;
     }
     const actualDeviceStatus = deviceState.status;
-    const expectedDeviceStatus = clause.value;
+
+    let expectedDeviceStatus;
+    if (clause.value_from && typeof clause.value_from === 'object' && clause.value_from.source_type === 'sensor' && clause.value_from.source_id && clause.value_from.metric) {
+        const compSensorKey = `sensor_${clause.value_from.source_id}`;
+        const compSensorData = contextDataForRule[compSensorKey];
+        if (compSensorData && compSensorData[clause.value_from.metric] !== undefined) {
+            expectedDeviceStatus = compSensorData[clause.value_from.metric];
+            // No parseFloat here, device status is typically a string.
+        } else {
+            logger.warn(`RulesEngine: Rule ${ruleId}, value_from sensor data for ${compSensorKey}.${clause.value_from.metric} not found or metric missing in context.`);
+            return false;
+        }
+    } else {
+        expectedDeviceStatus = clause.value;
+    }
+
     logger.debug(`RulesEngine: Device Eval: Rule ${ruleId} - Device ${clause.source_id} status is '${actualDeviceStatus}', rule expects operator '${clause.operator}' with value '${expectedDeviceStatus}'`);
     switch (clause.operator) {
       case '==': case '===': return actualDeviceStatus === expectedDeviceStatus;
@@ -65,7 +80,13 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         logger.warn(`RulesEngine: Unsupported operator '${clause.operator}' for device status in rule ${ruleId}. Clause: %j`, clause);
         return false;
     }
-  } else if (clause.source_type === 'sensor' && clause.source_id && clause.metric && clause.operator && clause.value !== undefined) {
+  } else if (clause.source_type === 'sensor' && clause.source_id && clause.metric && clause.operator) {
+    // Value can be direct (clause.value) or from another sensor (clause.value_from)
+    if (clause.value === undefined && clause.value_from === undefined) {
+        logger.warn(`RulesEngine: Rule ${ruleId}, sensor clause for ${clause.source_id}.${clause.metric} missing 'value' or 'value_from'. Clause:`, clause);
+        return false;
+    }
+
     const sensorContextKey = `sensor_${clause.source_id}`;
     const sensorData = contextDataForRule[sensorContextKey];
 
@@ -80,14 +101,36 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
 
     const actualValueStr = sensorData[clause.metric];
     const actualValueNum = parseFloat(actualValueStr);
-    const expectedValueNum = parseFloat(clause.value);
 
     if (isNaN(actualValueNum)) {
         logger.warn(`RulesEngine: Rule ${ruleId} - Actual sensor value '${actualValueStr}' for ${clause.source_id}.${clause.metric} is not a number.`);
         return false;
     }
-    if (isNaN(expectedValueNum)) {
-        logger.warn(`RulesEngine: Rule ${ruleId} - Expected value '${clause.value}' in rule for ${clause.source_id}.${clause.metric} is not a number.`);
+
+    let expectedValueNum;
+    if (clause.value_from && typeof clause.value_from === 'object' && clause.value_from.source_type === 'sensor' && clause.value_from.source_id && clause.value_from.metric) {
+        const comparisonSensorKey = `sensor_${clause.value_from.source_id}`;
+        const comparisonSensorData = contextDataForRule[comparisonSensorKey];
+        if (comparisonSensorData && comparisonSensorData[clause.value_from.metric] !== undefined) {
+            const comparisonValueStr = comparisonSensorData[clause.value_from.metric];
+            expectedValueNum = parseFloat(comparisonValueStr);
+            if (isNaN(expectedValueNum)) {
+                logger.warn(`RulesEngine: Rule ${ruleId}, 'value_from' sensor ${comparisonSensorKey}.${clause.value_from.metric} value '${comparisonValueStr}' is not a number.`);
+                return false;
+            }
+        } else {
+            logger.warn(`RulesEngine: Rule ${ruleId}, 'value_from' sensor data for ${comparisonSensorKey}.${clause.value_from.metric} not found or metric missing in context.`);
+            return false;
+        }
+    } else if (clause.value !== undefined) {
+        expectedValueNum = parseFloat(clause.value);
+        if (isNaN(expectedValueNum)) {
+            logger.warn(`RulesEngine: Rule ${ruleId} - Expected value '${clause.value}' in rule for ${clause.source_id}.${clause.metric} is not a number.`);
+            return false;
+        }
+    } else {
+        // This case should have been caught by the initial check, but as a safeguard:
+        logger.error(`RulesEngine: Rule ${ruleId}, sensor clause for ${clause.source_id}.${clause.metric} has neither 'value' nor valid 'value_from'. This is a logic error.`);
         return false;
     }
 
@@ -155,7 +198,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
     }
   } else if (clause.source_type === 'sensor_history') {
-    // Validate common fields: source_id, metric, aggregator, operator, value
     if (!clause.source_id || !clause.metric || !clause.aggregator || !clause.operator || clause.value === undefined) {
       logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause missing common required fields. Clause:`, clause);
       return false;
@@ -174,7 +216,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         }
         const windowStartTimeEpochMs = Date.now() - durationMs;
 
-        // Fetch up to SENSOR_HISTORY_MAX_LENGTH items. Filtering by time happens next.
         const rawSamples = await redisClient.lrange(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1);
         if (!rawSamples || rawSamples.length === 0) {
           logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey} for time_window.`);
@@ -183,7 +224,7 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
 
         relevantNumericValues = rawSamples.map(s => {
           try {
-            const point = JSON.parse(s); // Expects { ts: ISO_string, val: number_or_string }
+            const point = JSON.parse(s);
             if (point && point.ts && new Date(point.ts).getTime() >= windowStartTimeEpochMs) {
               return parseFloat(point.val);
             }
@@ -224,7 +265,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
       }
 
-      // Apply Aggregator (common for both time_window and samples)
       switch (clause.aggregator.toLowerCase()) {
         case 'avg': aggregatedValue = relevantNumericValues.reduce((sum, val) => sum + val, 0) / relevantNumericValues.length; break;
         case 'min': aggregatedValue = Math.min(...relevantNumericValues); break;
@@ -316,56 +356,92 @@ async function evaluateRules() {
     logger.info(`RulesEngine: Evaluating rule ID ${rule.id} ('${rule.name}'), Priority: ${rule.priority}.`);
     contextData[rule.id] = {};
 
-    const processClauseForData = async (clause) => {
+    const gatherDataForClause = async (clause) => {
+      // Device status fetching
       if (clause.source_type === 'device' && clause.source_id && clause.property === 'status') {
         const deviceHardwareId = clause.source_id;
-        logger.info(`RulesEngine: Rule ${rule.id} requires status for device (HW_ID): ${deviceHardwareId}`);
-        try {
-          const deviceResult = await pool.query("SELECT id, name, status, device_id FROM devices WHERE device_id = $1", [deviceHardwareId]);
-          if (deviceResult.rows.length > 0) {
-            contextData[rule.id][`device_${deviceHardwareId}`] = deviceResult.rows[0];
-            logger.info(`RulesEngine: Fetched status for device ${deviceHardwareId}: ${deviceResult.rows[0].status}`);
-          } else {
-            logger.warn(`RulesEngine: Device (HW_ID) '${deviceHardwareId}' in rule ${rule.id} not found.`);
-            contextData[rule.id][`device_${deviceHardwareId}`] = null;
-          }
-        } catch (fetchError) {
-          logger.error(`RulesEngine: Error fetching device ${deviceHardwareId} for rule ${rule.id}:`, { message: fetchError.message, stack: fetchError.stack });
-          contextData[rule.id][`device_${deviceHardwareId}`] = { error: 'Failed to fetch' };
-        }
-      } else if (clause.source_type === 'sensor' && clause.source_id && clause.metric) {
-        const redisKey = `sensor_latest:${clause.source_id}`;
-        const contextKey = `sensor_${clause.source_id}`;
-        logger.debug(`RulesEngine: Rule ${rule.id} requires sensor data for '${clause.source_id}' (metric: ${clause.metric}). Key: ${redisKey}`);
-        try {
-            const sensorData = await redisClient.hgetall(redisKey);
-            if (sensorData && Object.keys(sensorData).length > 0) {
-                contextData[rule.id][contextKey] = sensorData;
-                logger.debug(`RulesEngine: Fetched sensor data for ${redisKey}: %j`, sensorData);
+        const deviceContextKey = `device_${deviceHardwareId}`;
+        if (contextData[rule.id][deviceContextKey] === undefined) { // Fetch only if not already in context
+          logger.debug(`RulesEngine: Rule ${rule.id} requires status for device (HW_ID): ${deviceHardwareId}`);
+          try {
+            const deviceResult = await pool.query("SELECT id, name, status, device_id FROM devices WHERE device_id = $1", [deviceHardwareId]);
+            if (deviceResult.rows.length > 0) {
+              contextData[rule.id][deviceContextKey] = deviceResult.rows[0];
+              logger.debug(`RulesEngine: Fetched status for device ${deviceHardwareId}: ${deviceResult.rows[0].status}`);
             } else {
-                logger.warn(`RulesEngine: No data found in Redis for sensor key '${redisKey}' (Rule ${rule.id}).`);
-                contextData[rule.id][contextKey] = null;
+              logger.warn(`RulesEngine: Device (HW_ID) '${deviceHardwareId}' in rule ${rule.id} not found.`);
+              contextData[rule.id][deviceContextKey] = null;
             }
-        } catch (redisFetchError) {
-            logger.error(`RulesEngine: Error fetching sensor data from Redis for key '${redisKey}' (Rule ${rule.id}):`, { message: redisFetchError.message, stack: redisFetchError.stack });
-            contextData[rule.id][contextKey] = { error: 'Failed to fetch from Redis' };
+          } catch (fetchError) {
+            logger.error(`RulesEngine: Error fetching device ${deviceHardwareId} for rule ${rule.id}:`, { message: fetchError.message, stack: fetchError.stack });
+            contextData[rule.id][deviceContextKey] = { error: 'Failed to fetch device status' };
+          }
+        }
+      }
+      // Sensor data fetching (for primary sensor and value_from sensor)
+      else if (clause.source_type === 'sensor' && clause.source_id && clause.metric) {
+        // Fetch primary sensor data
+        const primarySensorId = clause.source_id;
+        const primarySensorRedisKey = `sensor_latest:${primarySensorId}`;
+        const primarySensorContextKey = `sensor_${primarySensorId}`;
+        if (contextData[rule.id][primarySensorContextKey] === undefined) {
+          logger.debug(`RulesEngine: Rule ${rule.id} requires primary sensor data for '${primarySensorId}' from key '${primarySensorRedisKey}'.`);
+          try {
+            const sensorData = await redisClient.hgetall(primarySensorRedisKey);
+            if (sensorData && Object.keys(sensorData).length > 0) {
+              contextData[rule.id][primarySensorContextKey] = sensorData;
+              logger.debug(`RulesEngine: Fetched primary sensor data for ${primarySensorRedisKey}: %j`, sensorData);
+            } else {
+              logger.warn(`RulesEngine: No data found in Redis for primary sensor key '${primarySensorRedisKey}' (Rule ${rule.id}).`);
+              contextData[rule.id][primarySensorContextKey] = null;
+            }
+          } catch (redisFetchError) {
+            logger.error(`RulesEngine: Error fetching primary sensor data from Redis for key '${primarySensorRedisKey}' (Rule ${rule.id}):`, redisFetchError);
+            contextData[rule.id][primarySensorContextKey] = { error: 'Failed to fetch primary sensor from Redis' };
+          }
+        }
+
+        // Check for and fetch data for 'value_from' sensor if specified
+        if (clause.value_from && typeof clause.value_from === 'object' &&
+            clause.value_from.source_type === 'sensor' && clause.value_from.source_id) {
+
+            const comparisonSensorId = clause.value_from.source_id;
+            const comparisonSensorRedisKey = `sensor_latest:${comparisonSensorId}`;
+            const comparisonSensorContextKey = `sensor_${comparisonSensorId}`;
+
+            if (contextData[rule.id][comparisonSensorContextKey] === undefined) {
+                logger.debug(`RulesEngine: Rule ${rule.id} clause requires comparison sensor data for '${comparisonSensorId}' from key '${comparisonSensorRedisKey}'.`);
+                try {
+                    const sensorData = await redisClient.hgetall(comparisonSensorRedisKey);
+                    if (sensorData && Object.keys(sensorData).length > 0) {
+                        contextData[rule.id][comparisonSensorContextKey] = sensorData;
+                        logger.debug(`RulesEngine: Fetched comparison sensor data for ${comparisonSensorRedisKey}: %j`, sensorData);
+                    } else {
+                        logger.warn(`RulesEngine: No data found in Redis for comparison sensor key '${comparisonSensorRedisKey}' (Rule ${rule.id}).`);
+                        contextData[rule.id][comparisonSensorContextKey] = null;
+                    }
+                } catch (redisFetchError) {
+                    logger.error(`RulesEngine: Error fetching comparison sensor data from Redis for key '${comparisonSensorRedisKey}' (Rule ${rule.id}):`, redisFetchError);
+                    contextData[rule.id][comparisonSensorContextKey] = { error: 'Failed to fetch comparison sensor from Redis' };
+                }
+            }
         }
       } else if (clause.source_type === 'sensor_history') {
          logger.debug(`RulesEngine: Rule ${rule.id} has sensor_history clause. Data will be fetched during evaluation. Clause: %j`, clause);
       } else if (clause.source_type === 'time') {
         logger.debug(`RulesEngine: Rule ${rule.id} has time-based condition. Evaluated directly. Clause: %j`, clause);
-      } else if (clause.source_type) {
-         logger.warn(`RulesEngine: Unhandled source_type '${clause.source_type}' during data gathering for rule ${rule.id}: %j`, clause);
-      } else {
+      } else if (clause.source_type) { // Known source_type but not one that needs pre-fetching here
+         logger.debug(`RulesEngine: Unhandled source_type '${clause.source_type}' during data gathering for rule ${rule.id} or no pre-fetch needed: %j`, clause);
+      } else { // Missing source_type
         logger.warn(`RulesEngine: Clause missing 'source_type' during data gathering for rule ${rule.id}: %j`, clause);
       }
     };
 
     if (rule.conditions) {
       if (rule.conditions.clauses && Array.isArray(rule.conditions.clauses)) {
-        for (const clause of rule.conditions.clauses) { await processClauseForData(clause); }
+        for (const clause of rule.conditions.clauses) { await gatherDataForClause(clause); }
       } else if (rule.conditions.source_type) {
-        await processClauseForData(rule.conditions);
+        await gatherDataForClause(rule.conditions);
       } else {
         logger.warn(`RulesEngine: Rule ID ${rule.id} has an unknown 'conditions' structure: %j`, rule.conditions);
       }
@@ -553,7 +629,10 @@ function stopRulesEngine() {
 }
 
 module.exports = {
-  initRulesEngineService, // Added init function
+  initRulesEngineService,
   startRulesEngine,
   stopRulesEngine,
+  // evaluateClause, // For testing purposes, if needed
+  // areConditionsMet, // For testing purposes, if needed
+  // evaluateRules, // For testing purposes, if needed
 };
