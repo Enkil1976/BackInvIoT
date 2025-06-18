@@ -676,7 +676,7 @@ process.on('SIGTERM', () => {
   }, 15000); // Increased overall timeout slightly for more services
 });
   }, 500); // Delay for worker/engine stop functions to start
-});
+
 
 // Función de punto de rocío (mejorada)
 function calcDewPoint(temp, hum) {
