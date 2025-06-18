@@ -366,9 +366,119 @@ This section covers API endpoints typically used for system administration and m
     -   `403 Forbidden`: User does not have the 'admin' role.
     -   `500 Internal Server Error`: If there's an issue fetching messages from the DLQ (e.g., Redis connectivity problem).
 
-#### Testing DLQ Message Viewing (`/api/system/dlq/critical-actions`)
+---
+#### `POST /api/system/dlq/critical-actions/message/{messageId}/retry`
+Attempts to re-queue a specific message from the Critical Actions DLQ back to the main processing queue.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Path Parameters:**
+    -   `messageId` (string, required): The Redis Stream ID of the message in the DLQ (e.g., "1678886400000-0").
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ message re-queued successfully.",
+      "originalDlqMessageId": "1678886400000-0",
+      "newQueueMessageId": "1678886900000-0"
+    }
+    ```
+    Or if re-queueing failed internally (e.g., publish to main queue failed):
+    ```json
+    {
+      "success": false,
+      "message": "Failed to re-queue message to main stream.",
+      "originalDlqMessageId": "1678886400000-0"
+    }
+    ```
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid `messageId` format.
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `404 Not Found`: If the `messageId` does not exist in the DLQ.
+    -   `500 Internal Server Error`: Server-side error during processing.
 
-These tests verify the ability to view messages that have landed in the Critical Actions Dead-Letter Queue (DLQ).
+---
+#### `DELETE /api/system/dlq/critical-actions/message/{messageId}`
+Deletes a specific message from the Critical Actions DLQ.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Path Parameters:**
+    -   `messageId` (string, required): The Redis Stream ID of the message in the DLQ.
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ message deleted.",
+      "deletedMessageId": "1678886400000-0",
+      "deletedCount": 1
+    }
+    ```
+-   **Response when message not found (Status 404 Not Found):**
+    ```json
+    {
+      "success": false,
+      "message": "DLQ message not found or already deleted.",
+      "deletedMessageId": "1678886400000-0",
+      "deletedCount": 0
+    }
+    ```
+-   **Error Responses:**
+    -   `400 Bad Request`: Invalid `messageId` format.
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error.
+
+---
+#### `POST /api/system/dlq/critical-actions/retry-all`
+Attempts to re-queue all messages currently in the Critical Actions DLQ back to the main processing queue.
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Query Parameters (Optional):**
+    -   `batchSize` (integer): While the API route might accept this, the current service implementation (`queueService.retryAllDlqMessages`) fetches and processes all messages in one go, not in batches. This parameter is noted for potential future enhancements.
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "message": "Retry all DLQ messages attempt complete.",
+      "totalAttempted": 5,
+      "successfullyRequeued": 4,
+      "failedToRequeue": 1
+    }
+    ```
+    Or if DLQ was empty:
+    ```json
+    {
+      "message": "DLQ is empty.",
+      "totalAttempted": 0,
+      "successfullyRequeued": 0,
+      "failedToRequeue": 0
+    }
+    ```
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error during processing.
+
+---
+#### `DELETE /api/system/dlq/critical-actions/clear-all`
+Deletes ALL messages from the Critical Actions DLQ by removing the DLQ stream itself. **Use with caution.**
+-   **Authentication:** Required (Admin role).
+-   **Authorization:** `authorize(['admin'])`
+-   **Success Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "DLQ stream 'critical_actions_dlq' deleted."
+    }
+    ```
+    (Note: If the stream didn't exist, Redis `DEL` command doesn't error, so the message would still typically indicate success in deleting/ensuring it's gone).
+-   **Error Responses:**
+    -   `401 Unauthorized`: Missing or invalid JWT.
+    -   `403 Forbidden`: User does not have 'admin' role.
+    -   `500 Internal Server Error`: Server-side error.
+
+#### Testing DLQ Message Viewing and Management (`/api/system/dlq/critical-actions/*`)
+
+These tests verify the ability to view and manage messages that have landed in the Critical Actions Dead-Letter Queue (DLQ).
 
 **Prerequisites:**
 -   An authenticated user with the 'admin' role.
@@ -417,11 +527,36 @@ These tests verify the ability to view messages that have landed in the Critical
         -   Note the ID of the first message. Use it as the `start` for the next query to get subsequent messages (e.g., `GET /api/system/dlq/critical-actions?start=<ID_of_first_message>&count=1`).
 
 **Test Case 2: Viewing an Empty DLQ**
-1.  Ensure the DLQ stream (`critical_actions_dlq`) is empty or delete it from Redis (`DEL critical_actions_dlq`). (Requires Redis CLI access or a temporary admin API if built).
+1.  Ensure the DLQ stream (`critical_actions_dlq`) is empty or delete it from Redis (`DEL critical_actions_dlq`). This can also be tested using the `DELETE /api/system/dlq/critical-actions/clear-all` endpoint.
 2.  **View the DLQ via API:**
     -   `GET /api/system/dlq/critical-actions`
     -   Verify: 200 OK.
     -   The response body should be an empty array `[]`.
+
+**Test Case 3: Retrying and Deleting DLQ Messages**
+1.  Follow steps in **Test Case 1** to get at least one message into the DLQ. Note its `id`.
+2.  **Retry the specific DLQ message:**
+    -   `POST /api/system/dlq/critical-actions/message/{dlqMessageId}/retry` (replace `{dlqMessageId}` with the actual ID).
+    -   Verify: 200 OK. The response should indicate success and provide a `newQueueMessageId`.
+    -   Check worker logs: The action should be processed again. If it fails again, it will re-enter the DLQ (possibly with a new DLQ ID).
+    -   Verify with `GET /api/system/dlq/critical-actions`: The original DLQ message ID should no longer be present.
+3.  **Force another message to the DLQ.** Note its ID.
+4.  **Delete the specific DLQ message:**
+    -   `DELETE /api/system/dlq/critical-actions/message/{dlqMessageId}/delete` (replace `{dlqMessageId}` with the new ID).
+    -   Verify: 200 OK. The response should indicate success and `deletedCount: 1`.
+    -   Verify with `GET /api/system/dlq/critical-actions`: The message should be gone.
+    -   Attempt to delete the same ID again. Verify: 404 Not Found.
+
+**Test Case 4: Retry All and Clear All DLQ Messages**
+1.  Force several messages into the DLQ (e.g., 2-3 messages).
+2.  **Retry All DLQ messages:**
+    -   `POST /api/system/dlq/critical-actions/retry-all`
+    -   Verify: 200 OK. Inspect the response summary (totalAttempted, successfullyRequeued, failedToRequeue).
+    -   Verify with `GET /api/system/dlq/critical-actions`: The DLQ should now be empty (or only contain messages that failed re-queuing immediately).
+3.  If any messages remain or new ones are forced, test **Clear All:**
+    -   `DELETE /api/system/dlq/critical-actions/clear-all`
+    -   Verify: 200 OK. The response should indicate the stream was deleted.
+    -   Verify with `GET /api/system/dlq/critical-actions`: The DLQ should be empty.
 
 ## Device Management
 
