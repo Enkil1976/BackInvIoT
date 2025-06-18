@@ -2,7 +2,6 @@ const cron = require('node-cron');
 const pool = require('../config/db');
 const logger = require('../config/logger');
 const redisClient = require('../config/redis');
-const { app } = require('../server');
 const operationService = require('./operationService');
 const { publishCriticalAction } = require('./queueService');
 
