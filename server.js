@@ -5,6 +5,13 @@ const Redis = require('ioredis');
 const cors = require('cors');
 const moment = require('moment');
 const winston = require('winston');
+const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
+const WebSocket = require('ws'); // Require WebSocket library
+const { startScheduler, stopScheduler } = require('./services/schedulerEngineService'); // Import scheduler functions
+const { startRulesEngine, stopRulesEngine } = require('./services/rulesEngineService'); // Import rules engine functions
+const { startWorker: startCriticalActionWorker, stopWorker: stopCriticalActionWorker } = require('./workers/criticalActionWorker'); // Import worker
+const url = require('url'); // For parsing URL query parameters
+const jwt = require('jsonwebtoken'); // For JWT verification
 
 // Configuración de logger
 const logger = winston.createLogger({
@@ -42,9 +49,16 @@ pool.query('SELECT 1')
 
 pool.on('error', (err) => logger.error(`PostgreSQL Pool Error: ${err.message}`));
 
+// Initialize and connect MQTT client
+connectMqtt();
+
 const app = express();
 
 const authRouter = require('./routes/auth');
+const deviceRoutes = require('./routes/devices'); // Import device routes
+const operationRoutes = require('./routes/operations'); // Import operation routes
+const scheduledOperationRoutes = require('./routes/scheduledOperations'); // Import scheduled operation routes
+const ruleRoutes = require('./routes/rules'); // Import rule routes
 
 // CORS Config (mejorado para producción)
 const allowedOrigins = process.env.CORS_ORIGINS ? 
@@ -91,6 +105,10 @@ app.use(express.json());
 
 // Montar rutas de autenticación
 app.use('/api/auth', authRouter);
+app.use('/api/devices', deviceRoutes); // Use device routes
+app.use('/api/operations', operationRoutes); // Use operation routes
+app.use('/api/scheduled-operations', scheduledOperationRoutes); // Use scheduled operation routes
+app.use('/api/rules', ruleRoutes); // Use rule routes
 
 // Cache Middleware (con invalidación por escritura)
 const cacheMiddleware = (key, ttl = 30) => async (req, res, next) => {
@@ -448,14 +466,207 @@ const server = app.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
 });
 
+// WebSocket Server Setup
+const wss = new WebSocket.Server({ server });
+app.locals.wss = wss; // Make wss available in app.locals for shutdown and broadcasting
+
+wss.on('connection', (ws, req) => {
+  const clientIp = req.socket.remoteAddress || req.headers['x-forwarded-for'];
+  logger.info(`WebSocket: Connection attempt from ${clientIp}. Path: ${req.url}`);
+
+  // Parse token from query parameter
+  let token;
+  try {
+    const parsedUrl = url.parse(req.url, true); // true to parse query string
+    token = parsedUrl.query.token;
+  } catch (e) {
+    logger.error(`WebSocket: Error parsing connection URL for token from ${clientIp}:`, e);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: 'Invalid connection request.' }));
+    ws.terminate();
+    return;
+  }
+
+  if (!token) {
+    logger.warn(`WebSocket: Connection attempt from ${clientIp} without token. Terminating.`);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: 'Authentication token required.' }));
+    ws.terminate();
+    return;
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'supersecret');
+    ws.user = { id: decoded.id, username: decoded.username, role: decoded.role }; // Attach user to ws object
+
+    logger.info(`WebSocket: Client authenticated and connected: User ${ws.user.username} (ID: ${ws.user.id}, Role: ${ws.user.role}) from ${clientIp}`);
+
+    // Original connection logic (welcome message, event handlers)
+    ws.on('message', (message) => {
+      try {
+        const parsedMessage = JSON.parse(message); // Assume clients send JSON
+        logger.info(`WebSocket: Received message from ${ws.user.username}: %j`, parsedMessage);
+        // TODO: Handle authenticated client messages if any specific actions are needed
+        // e.g., client pings, subscriptions to specific event types from this user
+        // Example: ws.send(JSON.stringify({ type: 'ack', original_payload: parsedMessage }));
+      } catch (e) {
+        // Handle non-JSON messages or messages with parsing errors
+        if (message instanceof Buffer) {
+            const rawMessage = message.toString();
+            logger.warn(`WebSocket: Received non-JSON binary/text message from ${ws.user.username}: ${rawMessage.substring(0,100)}...`);
+        } else {
+            logger.warn(`WebSocket: Received non-JSON message from ${ws.user.username}: ${message}`);
+        }
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      const reasonText = reason instanceof Buffer ? reason.toString() : reason;
+      logger.info(`WebSocket: Client disconnected: User ${ws.user?.username || 'Unknown (pre-auth or error)'} (ID: ${ws.user?.id}). Code: ${code}, Reason: ${reasonText || 'No reason given'}`);
+    });
+
+    ws.on('error', (error) => {
+      logger.error(`WebSocket: Error for user ${ws.user?.username || 'Unknown'}:`, error);
+    });
+
+    ws.send(JSON.stringify({ type: 'info', event: 'connection_success', message: 'WebSocket connection established and authenticated.' }));
+
+  } catch (error) {
+    logger.warn(`WebSocket: Invalid token for ${clientIp}. Connection terminated. Error: ${error.message}`);
+    ws.send(JSON.stringify({ type: 'error', event: 'authentication_failed', message: `Authentication failed: ${error.message}` }));
+    ws.terminate();
+  }
+});
+
+app.locals.broadcastWebSocket = (messageObject) => {
+  if (!app.locals.wss) {
+    logger.error('WebSocket server (wss) not initialized on app.locals. Cannot broadcast.');
+    return;
+  }
+  const messageString = JSON.stringify(messageObject);
+  logger.info(`Broadcasting WebSocket message to all clients: ${messageString}`);
+  app.locals.wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(messageString);
+      } catch (error) {
+        logger.error('Error sending message to a WebSocket client:', error);
+      }
+    }
+  });
+};
+
+logger.info('✅ WebSocket server initialized and attached to HTTP server.');
+
+// Start the scheduler engine
+startScheduler();
+
+// Start the rules engine
+startRulesEngine(); // This will use the _broadcastWebSocket set by its init function
+
+// Start the Critical Action Worker
+// This worker already accepts broadcastWebSocket via its startWorker function argument, which is good.
+if (app.locals.broadcastWebSocket) {
+  startCriticalActionWorker(app.locals.broadcastWebSocket);
+} else {
+  logger.error("CriticalActionWorker cannot start with broadcast capability: app.locals.broadcastWebSocket is not defined. Worker will start without it.");
+  startCriticalActionWorker();
+}
+
+
+// Initialize services with dependencies
+logger.info('Initializing services with dependencies...');
+const deviceService = require('./services/deviceService');
+if (deviceService.initDeviceService) {
+  deviceService.initDeviceService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initDeviceService not found on deviceService module. WebSocket broadcasts from this service may not work.');
+}
+
+const operationService = require('./services/operationService');
+if (operationService.initOperationService) {
+  operationService.initOperationService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initOperationService not found on operationService module. WebSocket broadcasts from this service may not work.');
+}
+
+const rulesEngineActualService = require('./services/rulesEngineService'); // Renamed to avoid conflict with startRulesEngine
+if (rulesEngineActualService.initRulesEngineService) {
+  rulesEngineActualService.initRulesEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initRulesEngineService not found on rulesEngineService module. WebSocket broadcasts from this service may not work.');
+}
+
+const schedulerEngineService = require('./services/schedulerEngineService'); // Renamed to avoid conflict
+if (schedulerEngineService.initSchedulerEngineService) {
+  schedulerEngineService.initSchedulerEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initSchedulerEngineService not found on schedulerEngineService module. WebSocket broadcasts from this service may not work.');
+}
+logger.info('Services initialized.');
+
+
 // Manejo de cierre adecuado
 process.on('SIGTERM', () => {
-  server.close(() => {
-    pool.end();
-    redisClient.disconnect();
-    logger.info('Server terminated');
-    process.exit(0);
+  logger.info('SIGTERM signal received: closing HTTP server and other services.');
+
+  // Stop background workers and engines first
+  if (typeof stopCriticalActionWorker === 'function') {
+    stopCriticalActionWorker(); // This needs to be async or allow a callback if it involves async ops
+  }
+  if (typeof stopRulesEngine === 'function') {
+    stopRulesEngine();
+  }
+  if (typeof stopScheduler === 'function') {
+    stopScheduler();
+  }
+  // A small delay to allow async stop functions to initiate
+  // This is a simplified approach. A more robust way involves promises or callbacks.
+  setTimeout(() => {
+    server.close(() => {
+    logger.info('HTTP server closed.');
+
+    // Disconnect other services
+    if (typeof disconnectMqtt === 'function') {
+        disconnectMqtt();
+    }
+    if (redisClient && typeof redisClient.disconnect === 'function') {
+        redisClient.disconnect();
+        logger.info('Redis client disconnected.');
+    }
+    if (pool && typeof pool.end === 'function') {
+        pool.end(() => logger.info('PostgreSQL pool ended.'));
+    }
+
+    // Close WebSocket server
+    if (app.locals.wss) {
+      logger.info('Closing WebSocket server...');
+      const wsTimeout = setTimeout(() => { // Give WS a chance to close gracefully
+        logger.warn('WebSocket server close timed out. Forcing client termination.');
+        if (app.locals.wss && app.locals.wss.clients) {
+            app.locals.wss.clients.forEach(client => client.terminate());
+        }
+        logger.info('All services attempted to close. Exiting process with error code due to timeout.');
+        process.exit(1);
+      }, 5000); // 5 seconds timeout for WS to close
+
+      app.locals.wss.close(() => {
+        clearTimeout(wsTimeout); // Clear the timeout if wss closes gracefully
+        logger.info('WebSocket server closed.');
+        logger.info('All services closed. Exiting process.');
+        process.exit(0);
+      });
+    } else {
+      logger.info('All services closed (WebSocket server not initialized). Exiting process.');
+      process.exit(0);
+    }
   });
+
+  // Fallback timeout for the entire SIGTERM handler
+  setTimeout(() => {
+    logger.error('Graceful shutdown timed out. Forcing exit.');
+    process.exit(1);
+  }, 15000); // Increased overall timeout slightly for more services
+});
+  }, 500); // Delay for worker/engine stop functions to start
 });
 
 // Función de punto de rocío (mejorada)
