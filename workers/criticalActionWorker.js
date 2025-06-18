@@ -3,6 +3,7 @@ const pool = require('../config/db'); // For DB lookups (e.g., device ID)
 const logger = require('../config/logger');
 const deviceService = require('../services/deviceService');
 const operationService = require('../services/operationService');
+const notificationService = require('../services/notificationService'); // <-- Add this
 // Add other services here if they can be targets of queued actions
 // const scheduleService = require('../services/scheduleService');
 // const rulesService = require('../services/rulesService');
@@ -18,6 +19,7 @@ const MAX_DLQ_STREAM_LENGTH = parseInt(process.env.CRITICAL_ACTIONS_DLQ_MAXLEN, 
 const services = {
   deviceService,
   operationService,
+  notificationService, // <-- Add this
   // scheduleService, // Add if actions can target scheduleService
   // rulesService,    // Add if actions can target rulesService
 };
@@ -30,6 +32,9 @@ const allowedServiceMethods = {
   },
   operationService: {
     recordOperation: services.operationService.recordOperation,
+  },
+  notificationService: { // <-- Add this block
+    sendNotification: services.notificationService.sendNotification,
   },
 };
 
@@ -169,6 +174,25 @@ async function processMessage(messageId, messageData) {
           result = await serviceMethodToCall(payload);
           logger.info(`CriticalActionWorker: Executed ${targetServiceString}.${targetMethodString} (Attempt ${attempts}). Origin: ${action.origin?.service}, Original Action in payload: ${payload.action}`);
 
+      } else if (targetServiceString === 'notificationService' && targetMethodString === 'sendNotification') {
+            if (!action.payload || typeof action.payload !== 'object') {
+                lastError = new Error(`Invalid or missing payload for ${targetServiceString}.${targetMethodString}`);
+                logger.error(`CriticalActionWorker: ${lastError.message}. Payload:`, action.payload);
+                attempts = MAX_EXECUTION_RETRIES; // Do not retry this kind of error.
+                throw lastError;
+            }
+            // The notificationService.sendNotification function itself does more detailed validation of subject, body etc.
+            result = await serviceMethodToCall(action.payload); // serviceMethodToCall is services.notificationService.sendNotification
+            // sendNotification service method returns { success: boolean, message: string }
+            if (result && result.success === false) { // Check if the service method indicated a failure (e.g. validation failure)
+                 logger.warn(`CriticalActionWorker: notificationService.sendNotification reported failure for action from message ID ${messageId}: ${result.message}`, action.payload);
+                 // This is not an executionError that should be retried by the worker usually,
+                 // as it's a business logic failure (e.g. bad params).
+                 // We will let it be considered a "success" for queue processing (ACK) if no exception was thrown.
+                 // If an error should be thrown to prevent ACK for bad params, the service should throw it.
+                 // For now, just log it. If sendNotification threw an error, it would be caught by the main catch.
+            }
+            logger.info(`CriticalActionWorker: Executed ${targetServiceString}.${targetMethodString} (Attempt ${attempts}). Origin: ${action.origin?.service}`);
       } else {
           lastError = new Error(`No specific handler for whitelisted action ${targetServiceString}.${targetMethodString}`);
           logger.error(`CriticalActionWorker: ${lastError.message} for message ID ${messageId}. This indicates a worker logic gap.`);

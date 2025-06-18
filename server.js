@@ -12,6 +12,7 @@ const { startRulesEngine, stopRulesEngine } = require('./services/rulesEngineSer
 const { startWorker: startCriticalActionWorker, stopWorker: stopCriticalActionWorker } = require('./workers/criticalActionWorker'); // Import worker
 const url = require('url'); // For parsing URL query parameters
 const jwt = require('jsonwebtoken'); // For JWT verification
+const notificationService = require('./services/notificationService'); // Import notification service
 
 // Configuración de logger
 const logger = winston.createLogger({
@@ -600,6 +601,12 @@ if (schedulerEngineService.initSchedulerEngineService) {
   schedulerEngineService.initSchedulerEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
 } else {
   logger.warn('initSchedulerEngineService not found on schedulerEngineService module. WebSocket broadcasts from this service may not work.');
+}
+
+if (notificationService.initNotificationService) {
+  notificationService.initNotificationService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+} else {
+  logger.warn('initNotificationService not found on notificationService module.');
 }
 logger.info('Services initialized.');
 

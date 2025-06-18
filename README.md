@@ -164,6 +164,39 @@ Creates a new scheduled operation.
     -   `409 Conflict`: Returned if the proposed schedule's execution time(s) directly clash with another existing enabled schedule for the same device. The system checks for exact time matches, considering the next execution for one-time tasks and the next few occurrences (e.g., next 5 or within a 48-hour window) for cron-based schedules. (This does not yet account for action durations).
     -   `500 Internal Server Error`: Server-side error.
 
+-   **Supported `action_name` values and their `action_params`:**
+    -   `set_status`:
+        -   Purpose: Changes the status of the target device.
+        -   `action_params`: `{ "status": "on" }` or `{ "status": "off" }` (or any other valid status string for the device type).
+    -   `apply_device_config`:
+        -   Purpose: Updates the `config` JSONB field of the target device.
+        -   `action_params`: `{ "config": { "key1": "value1", "brightness": 80 } }` (The content of `config` is specific to the device type).
+    -   `log_generic_event`:
+        -   Purpose: Records a generic event/log message via the `operationService`. This is useful for creating scheduled reminders or markers in the system logs.
+        -   `action_params`:
+            -   `log_message` (string, required): The primary message for the log.
+            -   `log_level` (string, optional, defaults to 'INFO'): Severity/type of log (e.g., 'INFO', 'WARN', 'ERROR').
+            -   `details` (object, optional): Additional structured data for the log.
+        -   Example: `{ "log_message": "Nightly backup process initiated.", "log_level": "INFO", "details": { "target_db": "main_cluster" } }`
+    -   `send_notification`:
+        -   Purpose: Schedules a notification to be processed by the `NotificationService`. Initially, this means the notification details will be logged, and an operation recorded. Future enhancements could involve sending actual emails, SMS, etc.
+        -   `action_params`:
+            -   `subject` (string, required): Subject line for the notification.
+            -   `body` (string, required): Main content/body of the notification.
+            -   `recipient_type` (string, required): Category or type of recipient (e.g., "system_log", "admin_dashboard", "email_user_group_X", "specific_user_id"). This guides how the notification might be processed or routed.
+            -   `recipient_target` (string, required): Specific target within the `recipient_type` (e.g., for "system_log", this could be "maintenance_alerts"; for "email_user_group_X", it could be "marketing_subscribers"; for "specific_user_id", it could be the user's actual ID).
+            -   `type` (string, optional, defaults to 'info'): Type/severity of the notification (e.g., 'info', 'warning', 'error', 'alert').
+        -   Example:
+            ```json
+            {
+              "subject": "Low Stock Alert: Product XYZ",
+              "body": "Product XYZ stock is below the threshold. Current stock: 5 units.",
+              "recipient_type": "inventory_alert_channel",
+              "recipient_target": "warehouse_managers_group",
+              "type": "warning"
+            }
+            ```
+
 #### `PUT /api/scheduled-operations/:id`
 Updates an existing scheduled operation.
 -   **Authentication:** Required (e.g., admin, editor roles).
@@ -246,6 +279,44 @@ These tests verify that the system prevents the creation or update of schedules 
     - `PUT /api/scheduled-operations/<schedule_7_id>`
     - Body: `{ "is_enabled": true }`
     - Verify: **409 Conflict**.
+
+#### Testing Scheduled Notifications
+
+**Test Case: Schedule a 'send_notification' action.**
+1.  **Create Schedule:**
+    -   `POST /api/scheduled-operations`
+    -   Body Example:
+        ```json
+        {
+          "device_id": null, // Or a relevant device_id if notification is device-specific
+          "action_name": "send_notification",
+          "action_params": {
+            "subject": "Scheduled System Maintenance Reminder",
+            "body": "System will undergo scheduled maintenance in 1 hour.",
+            "recipient_type": "system_log",
+            "recipient_target": "maintenance_alerts",
+            "type": "warning"
+          },
+          "execute_at": "YYYY-MM-DDTHH:MM:00Z" // A near future time (UTC)
+        }
+        ```
+    -   Verify: 201 Created. Note the schedule `id`.
+2.  **Observe Execution (when `execute_at` time arrives):**
+    -   The `criticalActionWorker` should pick up the queued action.
+    -   The `notificationService.sendNotification` should be called by the worker.
+3.  **Verify Logs:**
+    -   Check `operations_log` (via `GET /api/operations` or direct DB query) for entries related to this scheduled notification:
+        -   An entry from `SchedulerEngineService` with `action: 'schedule_action_queued'` for this schedule ID, indicating the `send_notification` action was successfully queued.
+        -   An entry from `CriticalActionWorker` with `action: 'queued_action_executed'`, where `targetService: 'notificationService'` and `targetMethod: 'sendNotification'`. The `details.originalAction.payload` should match your `action_params`.
+        -   An entry from `NotificationService` (logged via `operationService.recordOperation` call within `sendNotification`) with `action: 'notification_sent_log'`. The `details` should contain your notification's subject, body, type, etc.
+    -   Check application console logs (or your configured log output) for lines similar to:
+        -   `Scheduler: Action 'send_notification' for schedule ID <your_schedule_id> published to queue. Msg ID: <message_id>`
+        -   `CriticalActionWorker: Executing action for message ID <message_id>: ... "targetService":"notificationService","targetMethod":"sendNotification" ...`
+        -   `NotificationService: [WARNING] To: system_log (\`maintenance_alerts\`) - Subject: "Scheduled System Maintenance Reminder" ...` (The type like `[WARNING]` and content will match your `action_params`).
+4.  **Verify WebSocket (Optional):**
+    -   If you are monitoring WebSocket messages, you should observe:
+        -   A `schedule_action_outcome` event when the scheduler queues the action.
+        -   A `queued_action_executed` event when the worker processes the action.
 
 ## Device Management
 
