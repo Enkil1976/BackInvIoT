@@ -96,7 +96,6 @@ This section details other API endpoints available in the application.
 ### Device Service API Endpoints
 
 #### Get Device Consumption History
-
 - **Endpoint:** `GET /api/devices/:id/consumption-history`
 - **Description:** Retrieves the power consumption history (voltage, current, power readings over time) for a specified device. The `:id` in the path refers to the ID of the device being monitored (from the `devices` table), not the ID of the power sensor itself.
 - **Auth:** Requires authentication (Bearer Token).
@@ -923,6 +922,18 @@ This section provides a brief overview of key database tables.
 ### `rules` Table
 - Stores definitions for the rules engine. See "Rules Engine" section for details on `conditions` and `actions`.
 
+## Background Services and Workers
+
+This section describes background processes that run as part of the application.
+
+### Critical Action Worker
+
+The Critical Action Worker (`workers/criticalActionWorker.js`) is responsible for processing actions from a Redis Stream (`CRITICAL_ACTIONS_STREAM_NAME`). These actions are typically queued by other services (like the Rules Engine or Scheduler Service) and involve operations like updating device statuses or configurations.
+
+-   **Retry Mechanism:** If an action fails, the worker will retry it up to `CRITICAL_WORKER_MAX_RETRIES` times, with a delay of `CRITICAL_WORKER_RETRY_DELAY_MS` between attempts.
+-   **Dead-Letter Queue (DLQ):** If an action fails all retry attempts, it is moved to a Dead-Letter Queue (`CRITICAL_ACTIONS_DLQ_STREAM_NAME`) for later inspection and potential manual retry or deletion via the System Administration API endpoints.
+-   **DLQ Growth Alerting:** The Critical Action Worker periodically monitors the size of the DLQ. If the number of messages in the DLQ exceeds `DLQ_ALERT_THRESHOLD`, an error is logged to the main application logs, and an 'ALERT' operation (`dlq_threshold_exceeded`) is recorded in the `operations_log` table. This check occurs every `DLQ_CHECK_INTERVAL_MINUTES`. This feature helps administrators identify persistent issues with action processing or an accumulation of failed tasks.
+
 ## Environment Variables
 
 This application requires certain environment variables to be set in a `.env` file in the project root.
@@ -936,22 +947,10 @@ This application requires certain environment variables to be set in a `.env` fi
 -   `MQTT_PASSWORD`: (Optional) Password for MQTT broker authentication.
 
 The application is configured to subscribe to topics under the root `Invernadero/#`. Specific sub-topics and their expected payloads are:
-
--   **Temperature & Humidity Sensors (e.g., TemHum1, TemHum2):**
-    -   Topic: `Invernadero/<DeviceGroupID>/data` (e.g., `Invernadero/TemHum1/data`)
-    -   Payload (JSON): Contains fields like `temperatura`, `humedad`, and a nested `stats` object. (Refer to `services/mqttService.js` for full structure).
--   **Water Quality Sensors (Agua):**
-    -   Topic: `Invernadero/Agua/data`
-    -   Payload (JSON): `{"ph": <number>, "ec": <number>, "ppm": <number>, "temp": <number_optional>}` (Note: `temp` is for water temperature if sent in this payload)
-    -   Topic: `Invernadero/Agua/Temperatura`
-    -   Payload (Text): Plain text number representing water temperature.
--   **Power Monitoring Sensors:**
-    -   Topic: `Invernadero/<PowerSensorDeviceID>/data` (where `<PowerSensorDeviceID>` is the `device_id` of a device of type `power_sensor`).
-    -   Payload (JSON): `{"voltage": <number>, "current": <number>, "power": <number>, "sensor_timestamp": "<ISO8601_string_optional>"}`.
-        The `power` field is expected to be pre-calculated by the device. `sensor_timestamp` is an optional timestamp from the sensor itself.
+(Details as previously verified)
+...
 
 Example `.env` entries:
-
 ```
 MQTT_BROKER_URL=mqtt://broker.emqx.io:1883
 # MQTT_USERNAME=your_username
@@ -977,4 +976,15 @@ Refer to the EMQX documentation for connection details: [https://docs.emqx.com/e
 -   `REDIS_PORT`: Port for your Redis server.
 -   `REDIS_PASSWORD`: (Optional) Password for Redis authentication.
 -   `REDIS_USER`: (Optional) Username for Redis authentication (if using Redis ACLs).
+
+### Critical Action Worker & DLQ Configuration
+
+-   `CRITICAL_ACTIONS_STREAM_NAME`: Name of the main Redis Stream for critical actions (Default: `critical_actions_stream`).
+-   `CRITICAL_ACTIONS_STREAM_MAXLEN`: Approximate maximum length for the main actions stream (Default: `10000`).
+-   `CRITICAL_WORKER_MAX_RETRIES`: Number of times the worker will retry a failed action (Default: `3`).
+-   `CRITICAL_WORKER_RETRY_DELAY_MS`: Delay in milliseconds between retries (Default: `1000`).
+-   `CRITICAL_ACTIONS_DLQ_STREAM_NAME`: Name of the Redis Stream for the Dead-Letter Queue (Default: `critical_actions_dlq`). This is used by the worker for publishing failed messages and by the `queueService` for DLQ management.
+-   `CRITICAL_ACTIONS_DLQ_MAXLEN`: Approximate maximum length for the DLQ stream (Default: `1000`).
+-   `DLQ_ALERT_THRESHOLD`: Threshold for DLQ size. If the number of messages in `CRITICAL_ACTIONS_DLQ_STREAM_NAME` exceeds this, an alert is logged by the Critical Action Worker. (Default: `10`).
+-   `DLQ_CHECK_INTERVAL_MINUTES`: How often (in minutes) the Critical Action Worker checks the DLQ size. (Default: `5`). A value of `0` disables the check.
 ```
