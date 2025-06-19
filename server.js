@@ -14,6 +14,8 @@ const url = require('url'); // For parsing URL query parameters
 const jwt = require('jsonwebtoken'); // For JWT verification
 const notificationService = require('./services/notificationService'); // Import notification service
 
+let isShuttingDown = false; // Flag for graceful shutdown
+
 // Configuración de logger
 const logger = winston.createLogger({
   level: 'info',
@@ -615,11 +617,13 @@ logger.info('Services initialized.');
 
 // Manejo de cierre adecuado
 process.on('SIGTERM', () => {
-  logger.info('SIGTERM signal received: closing HTTP server and other services.');
+  logger.info('SIGTERM signal received: Initiating graceful shutdown...');
+  isShuttingDown = true;
 
-  // Stop background workers and engines first
+  // 1. Stop background tasks that might interfere with shutdown or use resources
+  logger.info('Stopping background services (Worker, Rules Engine, Scheduler)...');
   if (typeof stopCriticalActionWorker === 'function') {
-    stopCriticalActionWorker(); // This needs to be async or allow a callback if it involves async ops
+    stopCriticalActionWorker().catch(err => logger.error('Error stopping Critical Action Worker:', err));
   }
   if (typeof stopRulesEngine === 'function') {
     stopRulesEngine();
@@ -627,56 +631,94 @@ process.on('SIGTERM', () => {
   if (typeof stopScheduler === 'function') {
     stopScheduler();
   }
-  // A small delay to allow async stop functions to initiate
-  // This is a simplified approach. A more robust way involves promises or callbacks.
-  setTimeout(() => {
-    server.close(() => {
-    logger.info('HTTP server closed.');
 
-    // Disconnect other services
-    if (typeof disconnectMqtt === 'function') {
-        disconnectMqtt();
-    }
-    if (redisClient && typeof redisClient.disconnect === 'function') {
-        redisClient.disconnect();
-        logger.info('Redis client disconnected.');
-    }
-    if (pool && typeof pool.end === 'function') {
-        pool.end(() => logger.info('PostgreSQL pool ended.'));
+  // Overall shutdown timeout
+  const shutdownTimeout = setTimeout(() => {
+    logger.error('Graceful shutdown timed out overall (20s). Forcing exit.');
+    process.exit(1);
+  }, 20000);
+
+  // 2. Close HTTP server - this stops accepting new connections
+  logger.info('Closing HTTP server...');
+  server.close((err) => {
+    if (err) {
+      logger.error('Error during HTTP server close:', err);
+    } else {
+      logger.info('HTTP server closed.');
     }
 
-    // Close WebSocket server
-    if (app.locals.wss) {
+    // 3. Close WebSocket server
+    if (app.locals.wss && typeof app.locals.wss.close === 'function') {
       logger.info('Closing WebSocket server...');
-      const wsTimeout = setTimeout(() => { // Give WS a chance to close gracefully
-        logger.warn('WebSocket server close timed out. Forcing client termination.');
-        if (app.locals.wss && app.locals.wss.clients) {
-            app.locals.wss.clients.forEach(client => client.terminate());
+      let wsClosed = false;
+      const wsCloseTimeout = setTimeout(() => {
+        if (!wsClosed) {
+          logger.warn('WebSocket server close timed out (5s). Forcing client termination.');
+          if (app.locals.wss && app.locals.wss.clients) {
+            app.locals.wss.clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) client.terminate();
+            });
+          }
         }
-        logger.info('All services attempted to close. Exiting process with error code due to timeout.');
-        process.exit(1);
-      }, 5000); // 5 seconds timeout for WS to close
+      }, 5000);
 
       app.locals.wss.close(() => {
-        clearTimeout(wsTimeout); // Clear the timeout if wss closes gracefully
+        wsClosed = true;
+        clearTimeout(wsCloseTimeout);
         logger.info('WebSocket server closed.');
-        logger.info('All services closed. Exiting process.');
-        process.exit(0);
+        disconnectResourcesAndExit();
       });
     } else {
-      logger.info('All services closed (WebSocket server not initialized). Exiting process.');
-      process.exit(0);
+      logger.info('WebSocket server not initialized or already closed. Proceeding with resource disconnection.');
+      disconnectResourcesAndExit();
     }
   });
 
-  // Fallback timeout for the entire SIGTERM handler
-  setTimeout(() => {
-    logger.error('Graceful shutdown timed out. Forcing exit.');
-    process.exit(1);
-  }, 15000); // Increased overall timeout slightly for more services
-});
-  }, 500); // Delay for worker/engine stop functions to start
+  function disconnectResourcesAndExit() {
+    logger.info('Disconnecting resources (MQTT, Redis, PostgreSQL)...');
+    let resourcesPending = 3;
 
+    const resourceClosed = (resourceName) => {
+      logger.info(`${resourceName} disconnected/closed.`);
+      resourcesPending--;
+      if (resourcesPending === 0) {
+        logger.info('All resources disconnected/closed gracefully.');
+        clearTimeout(shutdownTimeout);
+        process.exit(0);
+      }
+    };
+
+    if (typeof disconnectMqtt === 'function') {
+      try {
+        disconnectMqtt();
+        resourceClosed('MQTT Client');
+      } catch (e) { logger.error('Error disconnecting MQTT (sync call):', e); resourceClosed('MQTT Client (error)');}
+    } else { resourceClosed('MQTT Client (not configured)'); }
+
+    if (redisClient && typeof redisClient.quit === 'function') {
+      redisClient.quit((err) => {
+        if(err) logger.error('Error disconnecting main Redis client with quit:', err);
+        resourceClosed('Main Redis Client');
+      }).catch(err => {
+        logger.error('Error during main Redis client quit promise:', err);
+        if(redisClient.status !== 'end') redisClient.disconnect();
+        resourceClosed('Main Redis Client (quit error)');
+      });
+    } else if (redisClient && typeof redisClient.disconnect === 'function') {
+       redisClient.disconnect();
+       resourceClosed('Main Redis Client (disconnect)');
+    } else { resourceClosed('Main Redis Client (not configured)');}
+
+    if (pool && typeof pool.end === 'function') {
+      pool.end(() => {
+        resourceClosed('PostgreSQL Pool');
+      }).catch(err => {
+         logger.error('Error ending PostgreSQL pool:', err);
+         resourceClosed('PostgreSQL Pool (error)');
+      });
+    } else { resourceClosed('PostgreSQL Pool (not configured)');}
+  }
+});
 
 // Función de punto de rocío (mejorada)
 function calcDewPoint(temp, hum) {
