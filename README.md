@@ -433,6 +433,20 @@ For the comparison value, use EITHER `value` OR `value_from`. If both are provid
           }
         }
         ```
+    -   *Example Clause (Comparing two metrics from the *same* sensor: `my_thermostat.current_temp` > `my_thermostat.setpoint_temp`):*
+        ```json
+        {
+          "source_type": "sensor",
+          "source_id": "my_thermostat",         // Primary sensor ID
+          "metric": "current_temp",           // Primary metric from this sensor
+          "operator": ">",
+          "value_from": {
+             "source_type": "sensor",
+             "source_id": "my_thermostat",     // SAME sensor ID as the primary source_id
+             "metric": "setpoint_temp"         // DIFFERENT metric from the same sensor
+          }
+        }
+        ```
 
 **Time-Based Conditions:**
 (Content as previously verified)
@@ -525,6 +539,10 @@ This section provides guidance on how to manually test the rules engine.
 ...
 
 ##### Testing Sensor Value Conditions with `value_from` (Comparing Two Sensors)
+(Content as previously verified)
+...
+
+##### Testing Sensor Trend Conditions (`sensor_trend`)
 (Content as previously verified)
 ...
 
