@@ -25,8 +25,49 @@ const connectMqtt = () => {
     reconnectPeriod: 1000,
   };
 
-  // Diagnostic logging removed as per subtask request.
-  // Pre-check for brokerUrl validity removed as MQTT_BROKER_URL is now a global const.
+  // CRITICAL DIAGNOSTIC LOG (Re-added):
+  // Read directly from process.env for logging to ensure we see what's truly in environment at connection time
+  const usernameForLog = process.env.MQTT_USERNAME;
+  const passwordFromEnvForLog = process.env.MQTT_PASSWORD;
+
+  logger.debug(
+    'MQTT Connect Attempt Details: ' +
+    `URL='${MQTT_BROKER_URL}', ` +
+    `ClientID='${options.clientId}', ` +
+    `Username='${usernameForLog || "N/A"}', ` +
+    `Password_Is_Set='${!!passwordFromEnvForLog}'`
+  );
+
+  if (passwordFromEnvForLog === undefined) {
+    logger.debug("MQTT_PASSWORD from env for connection is undefined.");
+  } else if (passwordFromEnvForLog === null) {
+    logger.debug("MQTT_PASSWORD from env for connection is null.");
+  } else if (passwordFromEnvForLog === "") {
+    logger.debug("MQTT_PASSWORD from env for connection is an empty string.");
+  } else if (typeof passwordFromEnvForLog === 'string') {
+    logger.debug(`MQTT_PASSWORD from env for connection is a non-empty string of length ${passwordFromEnvForLog.length}.`);
+  } else {
+    logger.debug(`MQTT_PASSWORD from env for connection is of type: ${typeof passwordFromEnvForLog}`);
+  }
+
+  if (usernameFromEnv === undefined) {
+    logger.debug("MQTT_USERNAME from env for connection is undefined.");
+  } else if (usernameFromEnv === null) {
+    logger.debug("MQTT_USERNAME from env for connection is null.");
+  } else if (usernameFromEnv === "") {
+    logger.debug("MQTT_USERNAME from env for connection is an empty string.");
+  } else {
+    logger.debug(`MQTT_USERNAME from env for connection is: '${usernameFromEnv}'`);
+  }
+
+  if (!MQTT_BROKER_URL || typeof MQTT_BROKER_URL !== 'string' || MQTT_BROKER_URL.trim() === '') {
+    logger.error("MQTT Connection Error: Global MQTT_BROKER_URL is invalid or not set. Please check .env file or its definition.", { brokerUrlAttempted: MQTT_BROKER_URL });
+    return; // Prevent connection attempt
+  }
+
+  // Note: The options object already uses process.env.MQTT_USERNAME and process.env.MQTT_PASSWORD,
+  // so the actual connection attempt will use the values from process.env at this point.
+  // The logging above is to confirm what those values are right before the attempt.
 
   // Use global module-level const for URL
   client = mqtt.connect(MQTT_BROKER_URL, options);
