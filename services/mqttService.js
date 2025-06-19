@@ -9,23 +9,57 @@ const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH
 // MQTT_BROKER_URL: Full URL to your MQTT broker (e.g., mqtt://your_broker.com:1883 or ws://your_broker.com:8083/mqtt for WebSocket)
 // MQTT_USERNAME: Username for MQTT broker authentication (optional)
 // MQTT_PASSWORD: Password for MQTT broker authentication (optional)
-const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://broker.emqx.io'; // Default to public EMQX broker for now
-const MQTT_CLIENT_ID = `mqtt_client_${Math.random().toString(16).slice(3)}`;
+// const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://broker.emqx.io'; // Default to public EMQX broker for now // MOVED
+// const MQTT_CLIENT_ID = `mqtt_client_${Math.random().toString(16).slice(3)}`; // MOVED
 const MQTT_TOPIC_TO_SUBSCRIBE = 'Invernadero/#';
 
 let client;
 
 const connectMqtt = () => {
+  // Define or re-define these inside the function to ensure .env is loaded at call time
+  const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtt://broker.emqx.io';
+  const mqttClientId = `mqtt_client_${Math.random().toString(16).slice(3)}`;
+  const usernameFromEnv = process.env.MQTT_USERNAME;
+  const passwordFromEnv = process.env.MQTT_PASSWORD;
+
   const options = {
-    clientId: MQTT_CLIENT_ID,
+    clientId: mqttClientId, // Use locally defined clientId
     clean: true,
     connectTimeout: 4000,
-    username: process.env.MQTT_USERNAME,
-    password: process.env.MQTT_PASSWORD,
+    username: usernameFromEnv,
+    password: passwordFromEnv,
     reconnectPeriod: 1000,
   };
 
-  client = mqtt.connect(MQTT_BROKER_URL, options);
+  // CRITICAL DIAGNOSTIC LOG:
+  logger.debug(
+    'MQTT Connect Attempt Details: ' +
+    `URL='${brokerUrl}', ` +
+    `ClientID='${options.clientId}', ` +
+    `Username='${options.username ? options.username : "N/A"}', ` + // Handle undefined username for logging
+    `Password_Is_Set='${!!options.password}'`
+  );
+  // For more detail on password presence without logging it:
+  if (options.password === undefined) {
+    logger.debug("MQTT_PASSWORD from env is undefined.");
+  } else if (options.password === null) {
+    logger.debug("MQTT_PASSWORD from env is null.");
+  } else if (options.password === "") {
+    logger.debug("MQTT_PASSWORD from env is an empty string.");
+  } else {
+    logger.debug(`MQTT_PASSWORD from env is a non-empty string of length ${options.password.length}.`);
+  }
+
+  if (!brokerUrl || typeof brokerUrl !== 'string' || brokerUrl.trim() === '') {
+    logger.error("MQTT Connection Error: MQTT_BROKER_URL is invalid or not set. Please check .env file.", { brokerUrl });
+    return; // Prevent connection attempt with invalid URL
+  }
+  // Optional: Add similar checks for username if it's always required by the broker
+  // if (!options.username) {
+  //   logger.warn("MQTT Connection Warning: MQTT_USERNAME is not set. Connecting anonymously if broker allows.");
+  // }
+
+  client = mqtt.connect(brokerUrl, options); // Use locally defined brokerUrl
 
   client.on('connect', () => {
     logger.info('✅ MQTT Client: Successfully connected to broker.');
