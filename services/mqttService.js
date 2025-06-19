@@ -50,14 +50,14 @@ const connectMqtt = () => {
     logger.debug(`MQTT_PASSWORD from env for connection is of type: ${typeof passwordFromEnvForLog}`);
   }
 
-  if (usernameFromEnv === undefined) {
+  if (usernameForLog === undefined) {
     logger.debug("MQTT_USERNAME from env for connection is undefined.");
-  } else if (usernameFromEnv === null) {
+  } else if (usernameForLog === null) {
     logger.debug("MQTT_USERNAME from env for connection is null.");
-  } else if (usernameFromEnv === "") {
+  } else if (usernameForLog === "") {
     logger.debug("MQTT_USERNAME from env for connection is an empty string.");
   } else {
-    logger.debug(`MQTT_USERNAME from env for connection is: '${usernameFromEnv}'`);
+    logger.debug(`MQTT_USERNAME from env for connection is: '${usernameForLog}'`);
   }
 
   if (!MQTT_BROKER_URL || typeof MQTT_BROKER_URL !== 'string' || MQTT_BROKER_URL.trim() === '') {

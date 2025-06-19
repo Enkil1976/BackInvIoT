@@ -559,6 +559,81 @@ app.locals.broadcastWebSocket = (messageObject) => {
   });
 };
 
+/**
+ * Sends a message to all WebSocket clients authenticated as a specific user ID.
+ * @param {string|number} userId - The ID of the user to target.
+ * @param {object} messageObject - The message object to send (will be stringified).
+ */
+app.locals.sendToUser = (userId, messageObject) => {
+  if (!app.locals.wss) {
+    logger.error('WebSocket server (wss) not initialized on app.locals. Cannot send to user.');
+    return 0; // Number of clients messaged
+  }
+  if (userId === undefined || userId === null) {
+    logger.warn('sendToUser called with null or undefined userId.');
+    return 0;
+  }
+  const messageString = JSON.stringify(messageObject);
+  let sentCount = 0;
+  logger.info(`Attempting to send WebSocket message to userId '${userId}': ${messageString.substring(0,100)}...`);
+
+  app.locals.wss.clients.forEach((client) => {
+    // Ensure client.user and client.user.id exist and match the target userId
+    // Note: client.user.id is typically an integer from the DB/JWT. Ensure userId is of a comparable type.
+    // If userId comes from a path param, it might be a string.
+    if (client.readyState === WebSocket.OPEN && client.user && client.user.id !== undefined && String(client.user.id) === String(userId)) {
+      try {
+        client.send(messageString);
+        sentCount++;
+      } catch (error) {
+        logger.error(`Error sending message to WebSocket client for userId ${userId} (client username ${client.user.username}):`, error);
+      }
+    }
+  });
+  if (sentCount > 0) {
+    logger.info(`Message sent to ${sentCount} WebSocket client(s) for userId '${userId}'.`);
+  } else {
+    logger.info(`No active WebSocket clients found for userId '${userId}'.`);
+  }
+  return sentCount;
+};
+
+/**
+ * Sends a message to all WebSocket clients authenticated with a specific role.
+ * @param {string} role - The role to target (e.g., 'admin', 'editor').
+ * @param {object} messageObject - The message object to send (will be stringified).
+ */
+app.locals.sendToRole = (role, messageObject) => {
+  if (!app.locals.wss) {
+    logger.error('WebSocket server (wss) not initialized on app.locals. Cannot send to role.');
+    return 0;
+  }
+  if (!role || typeof role !== 'string') {
+      logger.warn('sendToRole called with invalid or missing role.');
+      return 0;
+  }
+  const messageString = JSON.stringify(messageObject);
+  let sentCount = 0;
+  logger.info(`Attempting to send WebSocket message to role '${role}': ${messageString.substring(0,100)}...`);
+
+  app.locals.wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && client.user && client.user.role === role) {
+      try {
+        client.send(messageString);
+        sentCount++;
+      } catch (error) {
+        logger.error(`Error sending message to WebSocket client for role ${role} (client username ${client.user.username}):`, error);
+      }
+    }
+  });
+  if (sentCount > 0) {
+    logger.info(`Message sent to ${sentCount} WebSocket client(s) with role '${role}'.`);
+  } else {
+    logger.info(`No active WebSocket clients found with role '${role}'.`);
+  }
+  return sentCount;
+};
+
 logger.info('✅ WebSocket server initialized and attached to HTTP server.');
 
 // Start the scheduler engine

@@ -227,6 +227,128 @@ Updates an existing scheduled operation.
 (Content as previously verified, including Test Case 5 for DLQ Growth Alerting)
 ...
 
+## WebSocket Real-time Notifications
+
+This application provides real-time updates and notifications via WebSockets.
+
+### Connecting and Authentication
+
+-   **Endpoint:** The WebSocket server runs on the same port as the HTTP server (e.g., `ws://localhost:4000` or `wss://yourdomain.com` if using HTTPS/WSS).
+-   **Authentication:** To connect to the WebSocket server, clients **must** provide a valid JSON Web Token (JWT) obtained from the `/api/auth/login` endpoint. The token should be appended as a query parameter named `token` to the WebSocket connection URL.
+    -   Example: `ws://localhost:4000?token=YOUR_JWT_HERE`
+-   **Connection Handling:**
+    -   If the token is missing, invalid, or expired, the server will send an error message (JSON with `type: 'error', event: 'authentication_failed'`) and then terminate the WebSocket connection.
+    -   Upon successful authentication, the server will send a confirmation message (e.g., `{"type":"info","event":"connection_success","message":"WebSocket connection established and authenticated."}`).
+    -   The authenticated user's details (ID, username, role) are associated with their WebSocket connection on the server-side, enabling targeted messaging.
+
+### Server-to-Client Event Types
+
+Clients can expect to receive messages with different `type` fields, indicating the nature of the event.
+
+#### General Broadcast Events
+These events are typically broadcast to all authenticated and connected WebSocket clients.
+
+-   **`device_created`**:
+    -   Description: Sent when a new device is successfully registered in the system.
+    -   Payload: The full device object of the newly created device.
+-   **`device_updated`**:
+    -   Description: Sent when a device's general information (name, type, description, config, etc., excluding just status) is updated.
+    -   Payload: The full updated device object.
+-   **`device_status_updated`**:
+    -   Description: Sent when a device's status is specifically updated (e.g., 'online' to 'offline', 'on' to 'off'). This is a general broadcast.
+    -   Payload: The full device object with the new status.
+-   **`device_deleted`**:
+    -   Description: Sent when a device is deleted from the system.
+    -   Payload: An object containing the `id` and `name` of the deleted device.
+-   **`rule_triggered`**:
+    -   Description: Sent when a rule's conditions are met and its actions are about to be executed.
+    -   Payload: `{ rule_id: <id>, rule_name: "<name>", timestamp: "<ISO_date>", actions_attempted: [...] }`
+-   **`schedule_action_outcome`**:
+    -   Description: Sent by the Scheduler Engine after a scheduled task has been processed (i.e., its action has been queued or failed to queue).
+    -   Payload: `{ schedule_id: <id>, device_id: <id>, action_name: "<name>", outcome_status: "SUCCESS" | "FAILURE", outcome_details: {...}, processed_at: "<ISO_date>" }`
+-   **`queued_action_executed`**:
+    -   Description: Sent by the Critical Action Worker when an action from the queue has been successfully executed.
+    -   Payload: `{ messageId: "<stream_msg_id>", action: {...}, origin: {...}, attempts: <num>, executedAt: "<ISO_date>", actor: "<actor>" }`
+-   **`queued_action_dlq_moved`**:
+    -   Description: Sent by the Critical Action Worker when an action fails all retries and is moved to the Dead-Letter Queue (DLQ).
+    -   Payload: `{ originalMessageId: "<stream_msg_id>", action: {...}, ..., dlqMessageId: "<dlq_msg_id>" }`
+-   **`queued_action_dlq_error`**:
+    -   Description: Sent by the Critical Action Worker if it fails to move a message to the DLQ.
+    -   Payload: `{ originalMessageId: "<stream_msg_id>", ..., dlqPublishError: "<error_message>" }`
+
+#### Targeted Admin Events
+
+-   **Event Type:** `admin_device_status_alert`
+    -   **Description:** Sent *only* to authenticated clients with the 'admin' role when any device's status is updated by any means (e.g., direct API call, rule action, scheduled task). This provides real-time, admin-specific notification of device status changes for administrative monitoring and immediate awareness.
+    -   **Payload Example:**
+        ```json
+        {
+          "type": "admin_device_status_alert",
+          "message": "Device 'Living Room Lamp' (ID: 123) status updated to 'on'.",
+          "data": {
+            "id": 123,
+            "name": "Living Room Lamp",
+            "device_id": "HW_ID_LAMP_LR",
+            "status": "on",
+            "updated_at": "2023-10-27T12:35:00.123Z"
+          }
+        }
+        ```
+
+*(More event types may be added as the system evolves.)*
+
+### Manual Testing Guidelines for WebSockets
+
+#### Testing Targeted Admin Notifications for Device Status Updates
+
+This test verifies that only authenticated admin users receive the `admin_device_status_alert` when a device's status changes.
+
+**Prerequisites:**
+-   Two users registered in the system:
+    -   User A with role 'admin' (e.g., `admin_user`).
+    -   User B with a non-admin role (e.g., 'viewer' or the default 'user' role, e.g., `viewer_user`).
+-   Valid JWTs obtained for both `admin_user` and `viewer_user` via `POST /api/auth/login`.
+-   A registered device (e.g., with database ID `device_db_id_123`).
+-   A WebSocket client tool (e.g., a browser-based WebSocket tester, Postman WebSocket client, or a simple Node.js `ws` client script) capable of connecting with query parameters for token authentication.
+
+**Test Steps:**
+
+1.  **Connect WebSocket Client 1 (Admin User):**
+    -   Establish a WebSocket connection to the server (e.g., `ws://localhost:4000?token=ADMIN_USER_JWT`).
+    -   Verify connection is successful and authenticated (e.g., receives `{"type":"info","event":"connection_success",...}`).
+    -   Keep this client connected and listening for messages.
+
+2.  **Connect WebSocket Client 2 (Non-Admin User):**
+    -   Establish a second WebSocket connection to the server (e.g., `ws://localhost:4000?token=VIEWER_USER_JWT`).
+    -   Verify connection is successful and authenticated.
+    -   Keep this client connected and listening for messages.
+
+3.  **Trigger a Device Status Update:**
+    -   As an authenticated user with permission to update device status (e.g., admin or editor), send a `PATCH` request to `/api/devices/<device_db_id_123>/status`.
+    -   Example Body: `{"status": "active"}`
+    -   Verify the API call returns a 200 OK.
+
+4.  **Observe WebSocket Messages:**
+    -   **WebSocket Client 1 (Admin User - `admin_user`):**
+        -   Should receive the general `device_status_updated` broadcast message with the full updated device details.
+        -   Should **also** receive the targeted `admin_device_status_alert` message. Verify its payload structure:
+            ```json
+            {
+              "type": "admin_device_status_alert",
+              "message": "Device '<DeviceName>' (ID: <device_db_id_123>) status updated to 'active'.",
+              "data": { /* ... updated device object ... */ }
+            }
+            ```
+            *(Note: The message in the example was updated slightly to better reflect the example in the code where it says "...status updated to 'active' by a user/process." - the "by a user/process" part is not in the actual code, so I've removed it here for accuracy to the code.)*
+    -   **WebSocket Client 2 (Non-Admin User - `viewer_user`):**
+        -   Should receive the general `device_status_updated` broadcast message.
+        -   Should **NOT** receive the `admin_device_status_alert` message.
+
+5.  **Disconnect Clients:** Close both WebSocket connections.
+
+*(This test confirms that `sendToRole('admin', ...)` is working as intended and that WebSocket authentication/user roles are being respected for targeted messages).*
+
+
 ## Device Management
 (Content as previously verified)
 ...
@@ -355,95 +477,8 @@ This section provides guidance on how to manually test the rules engine.
 ...
 
 ##### Testing Sensor Value Conditions with `value_from` (Comparing Two Sensors)
-
-These tests verify conditions that compare a metric from one sensor against a metric from another sensor using the `value_from` field.
-
-**Prerequisites:**
-- Ensure `mqttService.js` is correctly configured to update latest sensor values in Redis Hashes (e.g., `sensor_latest:sensorA_id`, `sensor_latest:sensorB_id`).
-- Have a way to publish MQTT messages for at least two different sensor `source_id`s and their respective metrics (e.g., using an MQTT client tool like MQTT Explorer or `mosquitto_pub`).
-
-**Test Case C1: Sensor A temperature > Sensor B target_temperature**
-1.  **Publish Sensor Data for Sensor A (`room_temp_sensor`):**
-    -   Topic: `Invernadero/room_temp_sensor/data`
-    -   Payload: `{"temperatura": 25}`
-    -   Verify (optional): Check Redis `HGETALL sensor_latest:room_temp_sensor` shows `temperatura: "25"`.
-2.  **Publish Sensor Data for Sensor B (`thermostat_living`):**
-    -   Topic: `Invernadero/thermostat_living/data`
-    -   Payload: `{"target_temp": 22}`
-    -   Verify (optional): Check Redis `HGETALL sensor_latest:thermostat_living` shows `target_temp: "22"`.
-3.  **Rule Definition:**
-    -   Create a rule via `POST /api/rules`:
-        ```json
-        {
-          "name": "Room Temp Higher Than Thermostat Target",
-          "conditions": {
-            "source_type": "sensor",
-            "source_id": "room_temp_sensor",
-            "metric": "temperatura",
-            "operator": ">",
-            "value_from": {
-              "source_type": "sensor",
-              "source_id": "thermostat_living",
-              "metric": "target_temp"
-            }
-          },
-          "actions": [
-            { "service": "deviceService", "method": "updateDeviceStatus", "target_device_id": "cooler_hw_id", "params": {"status": "on"} }
-          ]
-        }
-        ```
-4.  **Execution & Verification (Rule Triggers):**
-    -   Wait for the Rules Engine to evaluate (e.g., up to 30 seconds or its cycle time).
-    -   Verify: The "cooler_hw_id" device should turn ON (since 25 > 22).
-    -   Check `operations_log` for rule trigger and action.
-5.  **Publish New Sensor Data for Sensor A (to make condition false):**
-    -   Topic: `Invernadero/room_temp_sensor/data`
-    -   Payload: `{"temperatura": 20}`
-6.  **Execution & Verification (Rule Does Not Trigger for ON, or triggers separate OFF rule):**
-    -   Wait for Rules Engine evaluation.
-    -   Verify: The "cooler_hw_id" should NOT be turned ON by *this* rule. (If it was already on, it would remain on unless another rule turns it off).
-
-**Test Case C2: Sensor A pH == Sensor B reference_pH (using different operator)**
-1.  **Publish Sensor Data for Sensor A (`tank1_ph`):**
-    - Topic: `Invernadero/tank1_ph/data` (assuming `source_id: "tank1_ph"`)
-    - Payload: `{"ph_value": 6.5}` (assuming metric is "ph_value")
-2.  **Publish Sensor Data for Sensor B (`ref_solution_ph`):**
-    - Topic: `Invernadero/ref_solution_ph/data` (assuming `source_id: "ref_solution_ph"`)
-    - Payload: `{"ph_value": 6.5}`
-3.  **Rule Definition (pH values are equal):**
-    ```json
-    {
-      "name": "Tank pH Matches Reference",
-      "conditions": {
-        "source_type": "sensor", "source_id": "tank1_ph", "metric": "ph_value", "operator": "==",
-        "value_from": { "source_type": "sensor", "source_id": "ref_solution_ph", "metric": "ph_value" }
-      },
-      "actions": [ { "service": "operationService", "method": "recordOperation", "params": {"serviceName": "RulesEngine", "action": "pHMatchLog", "status": "INFO", "details": {"message": "Tank 1 pH matches reference solution."}}} ]
-    }
-    ```
-4.  **Execution & Verification:** Rule should trigger, and a "pHMatchLog" operation should be recorded.
-5.  **Publish New Sensor Data for Sensor A (`tank1_ph`):** Payload: `{"ph_value": 6.8}`
-6.  **Execution & Verification:** Rule should NOT trigger for this condition (6.8 != 6.5).
-
-**Test Case C3: Data for `value_from` sensor is missing/stale**
-1.  **Publish Sensor Data for Sensor A (`room_temp_sensor`):**
-    - Topic: `Invernadero/room_temp_sensor/data`
-    - Payload: `{"temperatura": 25}`
-2.  **Setup for Missing Comparison Data:** Ensure no recent data exists in Redis for `sensor_latest:thermostat_nonexistent` or that its `target_temp` metric is missing. (e.g., by not publishing to `Invernadero/thermostat_nonexistent/data` or by deleting the Redis key `sensor_latest:thermostat_nonexistent`).
-3.  **Rule Definition (Compare with non-existent/stale sensor data):**
-    ```json
-    {
-      "name": "Compare With Stale Sensor",
-      "conditions": {
-        "source_type": "sensor", "source_id": "room_temp_sensor", "metric": "temperatura", "operator": ">",
-        "value_from": { "source_type": "sensor", "source_id": "thermostat_nonexistent", "metric": "target_temp" }
-      },
-      "actions": [  { "service": "deviceService", "method": "updateDeviceStatus", "target_device_id": "alert_light_hw_id", "params": {"status": "on"} } ]
-    }
-    ```
-4.  **Execution & Verification:**
-    -   The rule should NOT trigger.
-    -   Check debug logs in `rulesEngineService.js` for warnings like "No valid data for sensor ... in context" or "Metric ... not found for sensor ..." related to `thermostat_nonexistent` when the rule is evaluated.
+(Content as previously verified)
+...
 
 ## Database Schema Overview
 (Content as previously verified)

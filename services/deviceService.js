@@ -2,13 +2,24 @@ const pool = require('../config/db');
 const logger = require('../config/logger');
 
 let _broadcastWebSocket = null;
+let _sendToRole = null; // For targeted role-based WebSocket messages
 
 function initDeviceService(dependencies) {
-  if (dependencies && dependencies.broadcastWebSocket) {
-    _broadcastWebSocket = dependencies.broadcastWebSocket;
-    logger.info('DeviceService initialized with broadcastWebSocket capability.');
+  if (dependencies) {
+    if (dependencies.broadcastWebSocket) {
+      _broadcastWebSocket = dependencies.broadcastWebSocket;
+      logger.info('DeviceService: broadcastWebSocket capability initialized.');
+    } else {
+      logger.warn('DeviceService: broadcastWebSocket capability NOT initialized. General real-time updates will not be sent.');
+    }
+    if (dependencies.sendToRole) {
+      _sendToRole = dependencies.sendToRole;
+      logger.info('DeviceService: sendToRole capability initialized.');
+    } else {
+      logger.warn('DeviceService: sendToRole capability NOT initialized. Targeted role-based updates will not be sent.');
+    }
   } else {
-    logger.warn('DeviceService initialized WITHOUT broadcastWebSocket capability. Real-time updates will not be sent.');
+    logger.warn('DeviceService: No dependencies provided for initialization (broadcastWebSocket, sendToRole).');
   }
 }
 
@@ -217,6 +228,28 @@ async function updateDeviceStatus(id, newStatus) {
       }
     } else {
       logger.debug('broadcastWebSocket not available in DeviceService for device_status_updated event.');
+    }
+
+    // Send targeted message to admins
+    if (_sendToRole && typeof _sendToRole === 'function') {
+      try {
+        _sendToRole('admin', {
+          type: 'admin_device_status_alert',
+          message: `Device '${updatedDeviceWithStatus.name}' (ID: ${updatedDeviceWithStatus.id}) status updated to '${updatedDeviceWithStatus.status}'.`,
+          data: {
+            id: updatedDeviceWithStatus.id,
+            name: updatedDeviceWithStatus.name,
+            device_id: updatedDeviceWithStatus.device_id, // hardware ID
+            status: updatedDeviceWithStatus.status,
+            updated_at: updatedDeviceWithStatus.updated_at,
+            // Potentially include who made the change if that info is passed to updateDeviceStatus
+          }
+        });
+      } catch (targettedBroadcastError) {
+        logger.error('Error broadcasting admin_device_status_alert event via sendToRole:', targettedBroadcastError);
+      }
+    } else {
+      logger.debug('sendToRole not available in DeviceService for admin_device_status_alert event.');
     }
     return updatedDeviceWithStatus;
   } catch (err) {

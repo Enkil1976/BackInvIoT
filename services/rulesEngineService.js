@@ -63,7 +63,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         const compSensorData = contextDataForRule[compSensorKey];
         if (compSensorData && compSensorData[clause.value_from.metric] !== undefined) {
             expectedDeviceStatus = compSensorData[clause.value_from.metric];
-            // No parseFloat here, device status is typically a string.
         } else {
             logger.warn(`RulesEngine: Rule ${ruleId}, value_from sensor data for ${compSensorKey}.${clause.value_from.metric} not found or metric missing in context.`);
             return false;
@@ -81,7 +80,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
     }
   } else if (clause.source_type === 'sensor' && clause.source_id && clause.metric && clause.operator) {
-    // Value can be direct (clause.value) or from another sensor (clause.value_from)
     if (clause.value === undefined && clause.value_from === undefined) {
         logger.warn(`RulesEngine: Rule ${ruleId}, sensor clause for ${clause.source_id}.${clause.metric} missing 'value' or 'value_from'. Clause:`, clause);
         return false;
@@ -129,7 +127,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
             return false;
         }
     } else {
-        // This case should have been caught by the initial check, but as a safeguard:
         logger.error(`RulesEngine: Rule ${ruleId}, sensor clause for ${clause.source_id}.${clause.metric} has neither 'value' nor valid 'value_from'. This is a logic error.`);
         return false;
     }
@@ -148,6 +145,7 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
     }
   } else if (clause.source_type === 'time') {
+    // ... (existing time logic remains unchanged) ...
     if (!clause.condition_type) {
       logger.warn(`RulesEngine: Rule ${ruleId}, time condition missing 'condition_type'. Clause: %j`, clause);
       return false;
@@ -198,6 +196,7 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
         return false;
     }
   } else if (clause.source_type === 'sensor_history') {
+    // ... (existing sensor_history logic with time_window and samples remains unchanged) ...
     if (!clause.source_id || !clause.metric || !clause.aggregator || !clause.operator || clause.value === undefined) {
       logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause missing common required fields. Clause:`, clause);
       return false;
@@ -302,6 +301,111 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
 
     } catch (error) {
       logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_history clause for ${listKey}: ${error.message}`, { stack: error.stack, clause });
+      return false;
+    }
+  } else if (clause.source_type === 'sensor_trend') {
+    // Validate common fields
+    if (!clause.source_id || !clause.metric || !clause.trend_type ||
+        clause.threshold_change === undefined || !clause.operator || clause.value === undefined ||
+        (!clause.time_window && !clause.samples)) {
+      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_trend clause missing required fields (source_id, metric, trend_type, threshold_change, operator, value, and time_window/samples). Clause:`, clause);
+      return false;
+    }
+
+    const listKey = `sensor_history:${clause.source_id}:${clause.metric}`;
+    let trendDetected = false;
+    let dataPoints = []; // Array of {ts, val} objects
+
+    try {
+      // Fetch enough data, SENSOR_HISTORY_MAX_LENGTH is a general cap for list size
+      const rawSamples = await redisClient.lrange(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1);
+      if (!rawSamples || rawSamples.length === 0) {
+        logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey} for trend analysis.`);
+        return false;
+      }
+
+      const parsedSamples = rawSamples.map(s => {
+        try {
+          const point = JSON.parse(s); // Expects { ts: ISO_string, val: number_or_string }
+          return { ts: new Date(point.ts).getTime(), val: parseFloat(point.val) };
+        } catch (e) {
+          logger.warn(`RulesEngine: Rule ${ruleId}, error parsing historical data point '${s}' for trend: ${e.message}`);
+          return null; // Mark as null to be filtered
+        }
+      }).filter(p => p && !isNaN(p.val) && !isNaN(p.ts)); // Filter out nulls and entries with NaN values
+
+      // Determine data points based on time_window or samples
+      if (clause.time_window) {
+        const durationMs = parseDurationToMs(clause.time_window);
+        if (durationMs === null || durationMs <= 0) {
+          logger.warn(`RulesEngine: Rule ${ruleId}, invalid time_window '${clause.time_window}'. Clause:`, clause);
+          return false;
+        }
+        const windowStartTimeEpochMs = Date.now() - durationMs;
+        dataPoints = parsedSamples.filter(p => p.ts >= windowStartTimeEpochMs);
+      } else { // clause.samples (must be present if time_window is not, due to initial validation)
+        const samplesToConsider = parseInt(clause.samples, 10);
+         if (isNaN(samplesToConsider) || samplesToConsider <= 0) { // Should have been caught by initial validation, but good practice
+          logger.warn(`RulesEngine: Rule ${ruleId}, sensor_trend clause 'samples' ('${clause.samples}') is not a valid positive integer. Clause:`, clause);
+          return false;
+        }
+        dataPoints = parsedSamples.slice(0, samplesToConsider); // LRANGE returns newest first, so slice takes newest N
+      }
+
+      if (dataPoints.length === 0) {
+        logger.debug(`RulesEngine: Rule ${ruleId}, no data points in the specified window/samples for ${listKey}.`);
+        return false;
+      }
+
+      // Reverse to have oldest first for trend calculation (rising/falling from oldest to newest)
+      const valuesInWindow = dataPoints.map(p => p.val).reverse();
+
+      logger.debug(`RulesEngine: Rule ${ruleId}, trend analysis for ${listKey} using ${valuesInWindow.length} points:`, valuesInWindow);
+
+      const threshold = parseFloat(clause.threshold_change);
+      if (isNaN(threshold)) { // Threshold must be a number
+          logger.warn(`RulesEngine: Rule ${ruleId}, invalid threshold_change '${clause.threshold_change}'. Must be a number. Clause:`, clause);
+          return false;
+      }
+
+      switch (clause.trend_type.toLowerCase()) {
+        case 'rising':
+          if (valuesInWindow.length < 2) { trendDetected = false; break; }
+          // Change from first (oldest) to last (newest) must be >= threshold
+          trendDetected = (valuesInWindow[valuesInWindow.length - 1] - valuesInWindow[0] >= threshold);
+          break;
+        case 'falling':
+          if (valuesInWindow.length < 2) { trendDetected = false; break; }
+          // Change from first (oldest) to last (newest) must be <= -threshold (i.e., a drop of at least threshold)
+          // Or, (oldest - newest >= threshold)
+          trendDetected = (valuesInWindow[0] - valuesInWindow[valuesInWindow.length - 1] >= threshold);
+          break;
+        case 'stable':
+          if (valuesInWindow.length < 1) { trendDetected = false; break; }
+          const minVal = Math.min(...valuesInWindow);
+          const maxVal = Math.max(...valuesInWindow);
+          trendDetected = (maxVal - minVal <= threshold); // Fluctuation is within threshold
+          break;
+        default:
+          logger.warn(`RulesEngine: Rule ${ruleId}, unsupported trend_type '${clause.trend_type}'. Clause:`, clause);
+          return false;
+      }
+
+      logger.debug(`RulesEngine: Rule ${ruleId}, trend_type '${clause.trend_type}' detected as ${trendDetected} for ${listKey}. Threshold: ${threshold}`);
+
+      const expectedBooleanValue = String(clause.value).toLowerCase() === 'true';
+      let finalOutcome = false;
+      if (clause.operator === 'is' || clause.operator === '==' || clause.operator === '===') {
+        finalOutcome = (trendDetected === expectedBooleanValue);
+      } else if (clause.operator === 'isnot' || clause.operator === '!=' || clause.operator === '!==') {
+        finalOutcome = (trendDetected !== expectedBooleanValue);
+      } else {
+        logger.warn(`RulesEngine: Rule ${ruleId}, unsupported operator '${clause.operator}' for sensor_trend. Expected 'is' or 'isnot'. Defaulting to false.`);
+      }
+      return finalOutcome;
+
+    } catch (error) {
+      logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_trend clause for ${listKey}: ${error.message}`, { stack: error.stack, clause });
       return false;
     }
   } else {
@@ -426,13 +530,13 @@ async function evaluateRules() {
                 }
             }
         }
-      } else if (clause.source_type === 'sensor_history') {
-         logger.debug(`RulesEngine: Rule ${rule.id} has sensor_history clause. Data will be fetched during evaluation. Clause: %j`, clause);
+      } else if (clause.source_type === 'sensor_history' || clause.source_type === 'sensor_trend') {
+         logger.debug(`RulesEngine: Rule ${rule.id} has ${clause.source_type} clause. Data will be fetched during evaluation. Clause: %j`, clause);
       } else if (clause.source_type === 'time') {
         logger.debug(`RulesEngine: Rule ${rule.id} has time-based condition. Evaluated directly. Clause: %j`, clause);
-      } else if (clause.source_type) { // Known source_type but not one that needs pre-fetching here
+      } else if (clause.source_type) {
          logger.debug(`RulesEngine: Unhandled source_type '${clause.source_type}' during data gathering for rule ${rule.id} or no pre-fetch needed: %j`, clause);
-      } else { // Missing source_type
+      } else {
         logger.warn(`RulesEngine: Clause missing 'source_type' during data gathering for rule ${rule.id}: %j`, clause);
       }
     };
