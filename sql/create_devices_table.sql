@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS devices (
     status VARCHAR(50) DEFAULT 'offline', -- E.g., 'online', 'offline', 'active', 'inactive', 'error'
     config JSONB,                          -- Device-specific settings (pin number, polling interval, etc.)
     room_id INTEGER,                       -- Optional: Foreign key to a 'rooms' table
+    owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_seen_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE INDEX IF NOT EXISTS idx_devices_type ON devices(type);
 CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
 CREATE INDEX IF NOT EXISTS idx_devices_room_id ON devices(room_id);
+CREATE INDEX IF NOT EXISTS idx_devices_owner_user_id ON devices(owner_user_id); -- New index
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen_at ON devices(last_seen_at DESC);
 
 -- Optional: Trigger to automatically update updated_at timestamp
@@ -40,3 +42,4 @@ COMMENT ON COLUMN devices.type IS 'Categorization of the device (e.g., relay, se
 COMMENT ON COLUMN devices.status IS 'Current operational status of the device (e.g., online, offline, active, inactive, error)';
 COMMENT ON COLUMN devices.config IS 'JSONB field for device-specific configurations and settings';
 COMMENT ON COLUMN devices.room_id IS 'Optional foreign key to link device to a specific room or location';
+COMMENT ON COLUMN devices.owner_user_id IS 'Foreign key referencing the user who owns/manages this device.';
