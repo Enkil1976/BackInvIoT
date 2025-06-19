@@ -442,6 +442,54 @@ For the comparison value, use EITHER `value` OR `value_from`. If both are provid
 (Content as previously verified)
 ...
 
+**Sensor Trend Conditions (`sensor_trend`)**
+Evaluates if a specific sensor metric has been exhibiting a certain trend (rising, falling, or stable) over a recent period or number of samples. Data is sourced from Redis history lists.
+
+-   `source_type: "sensor_trend"` (Required)
+-   `source_id: "<sensor_identifier>"` (Required - e.g., "temhum1", "calidad_agua", "power:PS001") - The base ID for the sensor.
+-   `metric: "<metric_name>"` (Required - e.g., "temperatura", "ph", "voltage") - The specific metric to analyze.
+-   `trend_type: "rising" | "falling" | "stable"` (Required) - The type of trend to detect.
+-   `threshold_change: <number>` (Required) - The numeric threshold defining the trend:
+    -   For `rising`: The metric must increase by at least this amount from the oldest to the newest value in the set.
+    -   For `falling`: The metric must decrease by at least this amount from the oldest to the newest value in the set.
+    -   For `stable`: The difference between the maximum and minimum values in the set must be less than or equal to this amount.
+-   `operator: "is" | "==" | "===" | "isnot" | "!=" | "!=="` (Required) - Usually "is" or "==".
+-   `value: true | false` (Required) - The expected boolean outcome of the trend detection (e.g., `true` if the condition is "trend IS rising").
+
+Specify the observation window using EITHER `time_window` OR `samples`. One of these must be provided. If both are present, `time_window` takes precedence.
+
+-   `time_window: "<duration_string>"` (Optional string - e.g., "5m", "1h", "30s")
+    -   Analyzes samples received within this duration from the current time.
+    -   *Example (Temperature rising by at least 2 degrees over the last 10 minutes):*
+        ```json
+        {
+          "source_type": "sensor_trend",
+          "source_id": "temhum1",
+          "metric": "temperatura",
+          "trend_type": "rising",
+          "time_window": "10m",
+          "threshold_change": 2,
+          "operator": "is",
+          "value": true
+        }
+        ```
+
+-   `samples: <number>` (Optional integer - e.g., 5 for last 5 readings)
+    -   Analyzes this number of the most recent samples.
+    -   *Example (Humidity stable within 5% over the last 3 samples):*
+        ```json
+        {
+          "source_type": "sensor_trend",
+          "source_id": "temhum2",
+          "metric": "humedad",
+          "trend_type": "stable",
+          "samples": 3,
+          "threshold_change": 5,
+          "operator": "is",
+          "value": true
+        }
+        ```
+
 **Combining Conditions Example:**
 (Content as previously verified)
 ...
