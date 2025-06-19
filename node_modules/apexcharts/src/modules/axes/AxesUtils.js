@@ -175,16 +175,16 @@ export default class AxesUtils {
     }
     return labels
   }
-  
+
   yAxisAllSeriesCollapsed(index) {
     const gl = this.w.globals
 
     return !gl.seriesYAxisMap[index].some((si) => {
       return gl.collapsedSeriesIndices.indexOf(si) === -1
     })
-    
+
   }
-  
+
   // Method to translate annotation.yAxisIndex values from
   // seriesName-as-a-string values to seriesName-as-an-array values (old style
   // series mapping to new style).
@@ -206,7 +206,7 @@ export default class AxesUtils {
     const w = this.w
     const yaxis = w.config.yaxis[index]
 
-    if (!yaxis.show || this.yAxisAllSeriesCollapsed(index) 
+    if (!yaxis.show || this.yAxisAllSeriesCollapsed(index)
     ) {
       return true
     }
