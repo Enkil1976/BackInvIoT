@@ -95,6 +95,9 @@ This section details other API endpoints available in the application.
 
 ### Device Service API Endpoints
 
+(Content including owner_user_id in request/response and GET filter as previously verified)
+...
+
 #### Get Device Consumption History
 - **Endpoint:** `GET /api/devices/:id/consumption-history`
 - **Description:** Retrieves the power consumption history (voltage, current, power readings over time) for a specified device. The `:id` in the path refers to the ID of the device being monitored (from the `devices` table), not the ID of the power sensor itself.
@@ -295,188 +298,154 @@ These events are typically broadcast to all authenticated and connected WebSocke
         }
         ```
 
+#### Targeted User Events (Device Owners)
+
+-   **Event Type:** `owned_device_update`
+    -   **Description:** Sent *only* to the authenticated WebSocket client whose user ID matches the `owner_user_id` of a device when that specific device undergoes significant changes. This keeps device owners informed about their registered devices.
+    -   **Payload Fields:**
+        -   `type: "owned_device_update"`
+        -   `sub_type: "<change_type>"` (string, e.g., "status_change", "config_change", "details_change", "device_deleted") - Indicates what kind of update occurred.
+        -   `message: "<descriptive_message_string>"` (string) - A human-readable message about the update.
+        -   `data: Object` - The updated device object (or details of the deleted device).
+    -   **Payload Example (`sub_type: 'status_change'`):**
+        ```json
+        {
+          "type": "owned_device_update",
+          "sub_type": "status_change",
+          "message": "Status of your device 'Living Room Lamp' (ID: 123) changed to 'on'.",
+          "data": {
+            "id": 123,
+            "name": "Living Room Lamp",
+            "device_id": "HW_ID_LAMP_LR",
+            "status": "on",
+            "updated_at": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+    -   **Payload Example (`sub_type: 'config_change'`):**
+        ```json
+        {
+          "type": "owned_device_update",
+          "sub_type": "config_change",
+          "message": "Configuration of your device 'Smart Thermostat' (ID: 124) has been updated.",
+          "data": {
+            "id": 124,
+            "name": "Smart Thermostat",
+            "device_id": "HW_ID_THERM_01",
+            "config": {"target_temp": 22, "mode": "auto"},
+            "updated_at": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+    -   **Payload Example (`sub_type: 'details_change'`):**
+        ```json
+        {
+          "type": "owned_device_update",
+          "sub_type": "details_change",
+          "message": "Details of your device 'Garden Sprinkler' (ID: 125) have been updated (e.g., name, description, room, or ownership).",
+          "data": { /* Full updated device object */ }
+        }
+        ```
+    -   **Payload Example (`sub_type: 'device_deleted'`):**
+        ```json
+        {
+          "type": "owned_device_update",
+          "sub_type": "device_deleted",
+          "message": "Your device 'Old Porch Light' (ID: 456) has been deleted.",
+          "data": {
+            "id": 456,
+            "name": "Old Porch Light"
+          }
+        }
+        ```
+
 *(More event types may be added as the system evolves.)*
 
 ### Manual Testing Guidelines for WebSockets
 
 #### Testing Targeted Admin Notifications for Device Status Updates
+(Content as previously verified)
+...
 
-This test verifies that only authenticated admin users receive the `admin_device_status_alert` when a device's status changes.
+#### Testing Targeted Notifications to Device Owners (`owned_device_update`)
+
+This test verifies that the `owned_device_update` WebSocket event is sent specifically to the owner of a device when that device's status, configuration, or details change, or when it's deleted.
 
 **Prerequisites:**
--   Two users registered in the system:
-    -   User A with role 'admin' (e.g., `admin_user`).
-    -   User B with a non-admin role (e.g., 'viewer' or the default 'user' role, e.g., `viewer_user`).
--   Valid JWTs obtained for both `admin_user` and `viewer_user` via `POST /api/auth/login`.
--   A registered device (e.g., with database ID `device_db_id_123`).
--   A WebSocket client tool (e.g., a browser-based WebSocket tester, Postman WebSocket client, or a simple Node.js `ws` client script) capable of connecting with query parameters for token authentication.
+-   At least two registered users:
+    -   User Owner (e.g., `owner_user`, with ID `user_id_owner`)
+    -   User NonOwner (e.g., `non_owner_user`, with ID `user_id_non_owner`)
+    -   (Optional) User Admin (e.g., `admin_user`, with ID `user_id_admin`, having 'admin' role).
+-   Valid JWTs for all test users.
+-   A WebSocket client tool.
 
 **Test Steps:**
 
-1.  **Connect WebSocket Client 1 (Admin User):**
-    -   Establish a WebSocket connection to the server (e.g., `ws://localhost:4000?token=ADMIN_USER_JWT`).
-    -   Verify connection is successful and authenticated (e.g., receives `{"type":"info","event":"connection_success",...}`).
-    -   Keep this client connected and listening for messages.
+1.  **Create/Assign Device Ownership:**
+    -   As an admin or editor, create a new device or update an existing one (e.g., `device_X_db_id`) using `POST /api/devices` or `PUT /api/devices/<device_X_db_id>`.
+    -   In the request body, set `owner_user_id: <user_id_owner>`.
+    -   Verify the device is created/updated with the correct `owner_user_id`. Let's assume `device_X_db_id` is 123 for this test.
 
-2.  **Connect WebSocket Client 2 (Non-Admin User):**
-    -   Establish a second WebSocket connection to the server (e.g., `ws://localhost:4000?token=VIEWER_USER_JWT`).
-    -   Verify connection is successful and authenticated.
-    -   Keep this client connected and listening for messages.
+2.  **Connect WebSocket Clients:**
+    -   **Client 1 (Owner):** Connect to `ws://localhost:4000?token=OWNER_USER_JWT`. Verify successful authentication.
+    -   **Client 2 (Non-Owner):** Connect to `ws://localhost:4000?token=NON_OWNER_USER_JWT`. Verify successful authentication.
+    -   **Client 3 (Admin, Optional):** Connect to `ws://localhost:4000?token=ADMIN_USER_JWT`. Verify successful authentication.
 
-3.  **Trigger a Device Status Update:**
-    -   As an authenticated user with permission to update device status (e.g., admin or editor), send a `PATCH` request to `/api/devices/<device_db_id_123>/status`.
-    -   Example Body: `{"status": "active"}`
-    -   Verify the API call returns a 200 OK.
+3.  **Test Case A: Device Status Update**
+    -   **Trigger Action:** As an admin/editor, update the status of `device_X_db_id` (e.g., 123) using `PATCH /api/devices/123/status` to `{"status": "active"}`.
+    -   **Observe WebSockets:**
+        -   **Client 1 (Owner):** Should receive:
+            1.  The general `device_status_updated` event.
+            2.  The targeted `owned_device_update` event with `sub_type: 'status_change'`, a relevant message, and device data.
+        -   **Client 2 (Non-Owner):** Should receive *only* the general `device_status_updated` event.
+        -   **Client 3 (Admin):** Should receive general `device_status_updated` AND `admin_device_status_alert`.
 
-4.  **Observe WebSocket Messages:**
-    -   **WebSocket Client 1 (Admin User - `admin_user`):**
-        -   Should receive the general `device_status_updated` broadcast message with the full updated device details.
-        -   Should **also** receive the targeted `admin_device_status_alert` message. Verify its payload structure:
-            ```json
-            {
-              "type": "admin_device_status_alert",
-              "message": "Device '<DeviceName>' (ID: <device_db_id_123>) status updated to 'active'.",
-              "data": { /* ... updated device object ... */ }
-            }
-            ```
-            *(Note: The message in the example was updated slightly to better reflect the example in the code where it says "...status updated to 'active' by a user/process." - the "by a user/process" part is not in the actual code, so I've removed it here for accuracy to the code.)*
-    -   **WebSocket Client 2 (Non-Admin User - `viewer_user`):**
-        -   Should receive the general `device_status_updated` broadcast message.
-        -   Should **NOT** receive the `admin_device_status_alert` message.
+4.  **Test Case B: Device Configuration Update**
+    -   **Trigger Action:** As an admin/editor, update the configuration of `device_X_db_id` using `PUT /api/devices/123` with a body like `{"config": {"new_setting": "value"}}`.
+    -   **Observe WebSockets:**
+        -   **Client 1 (Owner):** Should receive general `device_updated` AND targeted `owned_device_update` with `sub_type: 'config_change'`.
+        -   **Client 2 (Non-Owner):** Should receive *only* general `device_updated`.
+        -   **Client 3 (Admin):** Should receive general `device_updated`.
 
-5.  **Disconnect Clients:** Close both WebSocket connections.
+5.  **Test Case C: Device Detail Update (e.g., Name Change)**
+    -   **Trigger Action:** As an admin/editor, update the name of `device_X_db_id` using `PUT /api/devices/123` with a body like `{"name": "Device New Name"}`.
+    -   **Observe WebSockets:**
+        -   **Client 1 (Owner):** Should receive general `device_updated` AND targeted `owned_device_update` with `sub_type: 'details_change'`.
+        -   **Client 2 (Non-Owner):** Should receive *only* general `device_updated`.
+        -   **Client 3 (Admin):** Should receive general `device_updated`.
 
-*(This test confirms that `sendToRole('admin', ...)` is working as intended and that WebSocket authentication/user roles are being respected for targeted messages).*
+6.  **Test Case D: Change of Ownership**
+    -   **Trigger Action:** As an admin/editor, update `device_X_db_id` to set `owner_user_id: <user_id_non_owner>`.
+    -   **Observe WebSockets:**
+        -   **Client 1 (Previous Owner):** Should receive general `device_updated` AND targeted `owned_device_update` with `sub_type: 'details_change'` (as their ownership status changed).
+        -   **Client 2 (New Owner):** Should receive general `device_updated` AND targeted `owned_device_update` with `sub_type: 'details_change'`.
+    -   **Follow-up Test:** Perform another status update on `device_X_db_id`. Now Client 2 (New Owner) should get the `owned_device_update` for status, and Client 1 (Previous Owner) should not.
 
+7.  **Test Case E: Remove Ownership (`owner_user_id: null`)**
+    -   **Trigger Action:** As an admin/editor, update `device_X_db_id` to set `owner_user_id: null`. (Assume Client 2 was the owner).
+    -   **Observe WebSockets:**
+        -   **Client 2 (Previous Owner):** Should receive general `device_updated` AND targeted `owned_device_update` with `sub_type: 'details_change'`.
+    -   **Follow-up Test:** Perform another status update. No user (other than admins for their `admin_device_status_alert`) should receive an `owned_device_update` for this device.
+
+8.  **Test Case F: Device Deletion**
+    -   First, re-assign ownership to `user_id_owner` for `device_X_db_id` for a clean test.
+    -   **Trigger Action:** As an admin, delete `device_X_db_id` using `DELETE /api/devices/123`.
+    -   **Observe WebSockets:**
+        -   **Client 1 (Owner):** Should receive general `device_deleted` AND targeted `owned_device_update` with `sub_type: 'device_deleted'`.
+        -   **Client 2 (Non-Owner):** Should receive *only* general `device_deleted`.
+        -   **Client 3 (Admin):** Should receive general `device_deleted`.
+
+9.  **Disconnect Clients:** Close all WebSocket connections.
 
 ## Device Management
 (Content as previously verified)
 ...
 
 ## Rules Engine
-
-The Rules Engine evaluates a set of defined rules periodically. If a rule's conditions are met, it executes predefined actions.
-
-### Rule Definition (`rules` table)
-
-A rule is defined by its name, description, conditions, actions, priority, and enabled status.
-
--   `name`: User-friendly name for the rule (e.g., "Turn on fan if office temp > 25C during work hours").
--   `description`: Optional text describing the rule.
--   `conditions`: A JSONB object defining the logic for the rule to trigger.
--   `actions`: A JSONB array specifying what to do when conditions are met.
--   `is_enabled`: Boolean, true if the rule should be evaluated.
--   `priority`: Integer, for ordering rule evaluation (higher values typically mean higher priority).
--   `last_triggered_at`: Timestamp of when the rule last triggered.
-
-#### Rule Conditions (`conditions` JSONB field)
-
-The `conditions` field defines when a rule should trigger. It can be a single condition object or an object with a `type` ("AND" or "OR") and a `clauses` array.
-
-**Common Clause Fields:**
-- `source_type`: String, type of data source (e.g., "device", "sensor", "time").
-- `operator`: String, the comparison operator (e.g., "==", ">", "<=").
-- `value`: The value to compare against (string or number, depending on the context). Can also be an object for dynamic comparisons (see below).
-
-**Device Status Conditions:**
-- `source_type: "device"`
-- `source_id: "<hardware_id_of_device>"` (This is the `device_id` from the `devices` table)
-- `property: "status"` (Currently, only "status" is supported for devices)
-- `operator: "=="` or `"!="`
-- `value: "<status_string>"` (e.g., "on", "offline", "active")
-  *(Note: `value_from` can also be used here if comparing device status to a sensor's string value, though less common. See Sensor Value Conditions for `value_from` structure.)*
-*Example:*
-```json
-{ "source_type": "device", "source_id": "relay_living_room_light", "property": "status", "operator": "==", "value": "off" }
-```
-
-**Sensor Value Conditions (`sensor`)**
-Evaluates a condition based on the latest reading of a specific sensor metric (fetched from Redis cache).
-
-- `source_type: "sensor"`
-- `source_id: "<sensor_A_identifier>"` (e.g., "temhum1", "calidad_agua", "power:PS001") - The main sensor for the condition.
-- `metric: "<metric_A_name>"` (e.g., "temperatura", "voltage", "ph") - The metric from Sensor A to evaluate.
-- `operator: ">" | "<" | ">=" | "<=" | "==" | "!="` (Required)
-
-For the comparison value, use EITHER `value` OR `value_from`. If both are provided, `value_from` will take precedence.
-
--   **`value: <number>`** (Required if `value_from` is not used)
-    -   A static numeric value to compare against Sensor A's metric.
-    -   *Example Clause (Temperature of `temhum1` > 25):*
-        ```json
-        {
-          "source_type": "sensor",
-          "source_id": "temhum1",
-          "metric": "temperatura",
-          "operator": ">",
-          "value": 25
-        }
-        ```
-
--   **`value_from: Object`** (Optional, use if comparing against another sensor's metric)
-    -   An object specifying another source (currently, another sensor) whose metric will be used for comparison against Sensor A's metric.
-    -   **Fields for `value_from` when its `source_type` is "sensor":**
-        -   `source_type: "sensor"` (Required)
-        -   `source_id: "<sensor_B_identifier>"` (Required - The ID of the sensor to compare against)
-        -   `metric: "<metric_B_name>"` (Required - The metric from Sensor B to use for comparison)
-    -   *Example Clause (Temperature of `room_temp` > Target Temperature of `thermostat_main`):*
-        ```json
-        {
-          "source_type": "sensor",
-          "source_id": "room_temp",
-          "metric": "temperatura",
-          "operator": ">",
-          "value_from": {
-             "source_type": "sensor",
-             "source_id": "thermostat_main",
-             "metric": "target_temp"
-          }
-        }
-        ```
-
-**Time-Based Conditions:**
-(Content as previously verified)
-...
-
-**Sensor History Conditions (`sensor_history`)**
-(Content as previously verified)
-...
-
-**Combining Conditions Example:**
-(Content as previously verified)
-...
-
-#### Rule Actions (`actions` JSONB field)
 (Content as previously verified)
 ...
 
 ### Manual Testing Guidelines for Rules
-
-This section provides guidance on how to manually test the rules engine.
-
-#### General Prerequisites for Testing Rules
-*   Ensure the Rules Engine (`services/rulesEngineService.js`) is running (it's started by `server.js`).
-*   You have API access to create, update, and view rules (e.g., via `POST /api/rules`, `PUT /api/rules/:id`, `GET /api/rules/:id`).
-*   You can observe the results of rule actions. This might involve:
-    *   Checking device statuses via `GET /api/devices/:id`.
-    *   Monitoring `operations_log` via `GET /api/operations` for `rule_triggered` events and action-specific logs.
-    *   Observing WebSocket messages for `rule_triggered` or action-specific events.
-    *   Checking the `last_triggered_at` field of a rule via `GET /api/rules/:id`.
-*   You can manipulate the inputs to your rule conditions (e.g., change a device's status via API or MQTT, or wait for specific times).
-
-#### Testing Time-Based Conditions
-(Content as previously verified)
-...
-
-**General Verification for all Time-Based Tests:**
-(Content as previously verified)
-...
-
-##### Testing Sensor History Conditions (`sensor_history`)
-(Content as previously verified)
-...
-
-##### Testing Sensor Value Conditions with `value_from` (Comparing Two Sensors)
 (Content as previously verified)
 ...
 
@@ -489,6 +458,6 @@ This section provides guidance on how to manually test the rules engine.
 ...
 
 ## Environment Variables
-(Content as previously verified, including Critical Action Worker & DLQ Configuration)
+(Content as previously verified)
 ...
 ```

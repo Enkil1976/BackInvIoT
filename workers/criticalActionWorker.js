@@ -92,8 +92,30 @@ async function checkDlqSizeAndAlert() {
           checkIntervalMinutes: DLQ_CHECK_INTERVAL_MINUTES
         }
       });
-      // Future: Could also integrate with notificationService here
-      // e.g., if (services.notificationService && typeof services.notificationService.sendNotification === 'function') { ... }
+
+      // Now, also attempt to send a notification via NotificationService
+      if (notificationService && typeof notificationService.sendNotification === 'function') {
+        try {
+          await notificationService.sendNotification({
+            subject: `DLQ Alert: Stream '${ACTUAL_DLQ_STREAM_NAME}' Threshold Exceeded`,
+            body: `The Critical Actions DLQ stream '${ACTUAL_DLQ_STREAM_NAME}' current size (${dlqSize}) has exceeded the configured threshold of ${DLQ_ALERT_THRESHOLD}. Manual review may be required.`,
+            recipient_type: 'system_monitoring_channel', // Example recipient type
+            recipient_target: 'dlq_alerts',             // Example target
+            type: 'ALERT',                               // Notification type
+            originDetails: {
+                service: 'CriticalActionWorker',
+                streamName: ACTUAL_DLQ_STREAM_NAME,
+                currentSize: dlqSize,
+                threshold: DLQ_ALERT_THRESHOLD
+            }
+          });
+          logger.info(`DLQCheck: NotificationService was called for DLQ threshold alert on '${ACTUAL_DLQ_STREAM_NAME}'.`);
+        } catch (notificationError) {
+          logger.error(`DLQCheck: Error calling notificationService.sendNotification for DLQ alert on '${ACTUAL_DLQ_STREAM_NAME}':`, notificationError);
+        }
+      } else {
+        logger.warn('DLQCheck: notificationService.sendNotification is not available. Cannot send DLQ threshold notification.');
+      }
     }
   } catch (error) {
     if (error && error.message && !error.message.toLowerCase().includes('no such key')) {

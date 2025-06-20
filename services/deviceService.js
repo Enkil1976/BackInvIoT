@@ -2,7 +2,8 @@ const pool = require('../config/db');
 const logger = require('../config/logger');
 
 let _broadcastWebSocket = null;
-let _sendToRole = null; // For targeted role-based WebSocket messages
+let _sendToRole = null;
+let _sendToUser = null; // For targeted user-based WebSocket messages
 
 function initDeviceService(dependencies) {
   if (dependencies) {
@@ -18,12 +19,18 @@ function initDeviceService(dependencies) {
     } else {
       logger.warn('DeviceService: sendToRole capability NOT initialized. Targeted role-based updates will not be sent.');
     }
+    if (dependencies.sendToUser) { // New
+      _sendToUser = dependencies.sendToUser;
+      logger.info('DeviceService: sendToUser capability initialized.');
+    } else {
+      logger.warn('DeviceService: sendToUser capability NOT initialized. Targeted user-specific updates will not be sent.');
+    }
   } else {
-    logger.warn('DeviceService: No dependencies provided for initialization (broadcastWebSocket, sendToRole).');
+    logger.warn('DeviceService: No dependencies provided for initialization (broadcastWebSocket, sendToRole, sendToUser).');
   }
 }
 
-async function createDevice({ name, device_id, type, description, status, config, room_id }) {
+async function createDevice({ name, device_id, type, description, status, config, room_id, owner_user_id }) { // Added owner_user_id
   if (!name || !device_id || !type) {
     const error = new Error('Name, device_id, and type are required for creating a device.');
     error.status = 400;
@@ -32,14 +39,15 @@ async function createDevice({ name, device_id, type, description, status, config
   }
   try {
     const query = `
-      INSERT INTO devices (name, device_id, type, description, status, config, room_id, last_seen_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO devices (name, device_id, type, description, status, config, room_id, owner_user_id, last_seen_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *;
     `;
-    const values = [name, device_id, type, description, status || 'offline', config || {}, room_id, null];
+    // Ensure owner_user_id is null if not provided or explicitly set to null
+    const values = [name, device_id, type, description, status || 'offline', config || {}, room_id || null, owner_user_id || null, null];
     const result = await pool.query(query, values);
     const newDevice = result.rows[0];
-    logger.info(`Device created: ${newDevice.name} (ID: ${newDevice.id})`);
+    logger.info(`Device created: ${newDevice.name} (ID: ${newDevice.id}), Owner User ID: ${newDevice.owner_user_id}`);
 
     if (_broadcastWebSocket && typeof _broadcastWebSocket === 'function') {
       try {
@@ -47,13 +55,12 @@ async function createDevice({ name, device_id, type, description, status, config
       } catch (broadcastError) {
         logger.error('Error broadcasting device_created event:', broadcastError);
       }
-    } else {
-      logger.debug('broadcastWebSocket not available in DeviceService for device_created event.');
     }
+    // No specific user notification on creation yet, unless required.
     return newDevice;
   } catch (err) {
     logger.error(`Error in createDevice (device_id: ${device_id}): ${err.message}`, { error: err });
-    if (err.code === '23505') {
+    if (err.code === '23505') { // Unique violation
         const specificError = new Error(`Device with this name or device_id already exists. (${err.constraint})`);
         specificError.status = 409;
         throw specificError;
@@ -71,6 +78,8 @@ async function getDevices(params = {}) {
   if (params.type) { conditions.push(`type = $${paramCount++}`); values.push(params.type); }
   if (params.status) { conditions.push(`status = $${paramCount++}`); values.push(params.status); }
   if (params.room_id) { conditions.push(`room_id = $${paramCount++}`); values.push(params.room_id); }
+  if (params.owner_user_id) { conditions.push(`owner_user_id = $${paramCount++}`); values.push(params.owner_user_id); }
+
 
   if (conditions.length > 0) { queryStr += ' WHERE ' + conditions.join(' AND '); }
   queryStr += ' ORDER BY created_at DESC';
@@ -109,7 +118,7 @@ async function updateDevice(id, updateData) {
     const error = new Error('Invalid device ID format.');
     error.status = 400; logger.warn(error.message, { id }); throw error;
   }
-   const { name, type, description, status, config, room_id, last_seen_at } = updateData;
+   const { name, type, description, status, config, room_id, owner_user_id, last_seen_at } = updateData; // Added owner_user_id
    const fields = [];
    const values = [];
    let paramCount = 1;
@@ -119,8 +128,10 @@ async function updateDevice(id, updateData) {
    if (description !== undefined) { fields.push(`description = $${paramCount++}`); values.push(description); }
    if (status !== undefined) { fields.push(`status = $${paramCount++}`); values.push(status); }
    if (config !== undefined) { fields.push(`config = $${paramCount++}`); values.push(config); }
-   if (room_id !== undefined) { fields.push(`room_id = $${paramCount++}`); values.push(room_id); }
+   if (room_id !== undefined) { fields.push(`room_id = $${paramCount++}`); values.push(room_id === null ? null : parseInt(room_id, 10)); }
+   if (owner_user_id !== undefined) { fields.push(`owner_user_id = $${paramCount++}`); values.push(owner_user_id === null ? null : parseInt(owner_user_id, 10)); } // Handle null for removing owner
    if (last_seen_at !== undefined) { fields.push(`last_seen_at = $${paramCount++}`); values.push(last_seen_at); }
+
 
    if (fields.length === 0) {
      const error = new Error('No fields provided for update.');
@@ -136,7 +147,7 @@ async function updateDevice(id, updateData) {
       error.status = 404; throw error;
     }
     const updatedDevice = result.rows[0];
-    logger.info(`Device updated: ${updatedDevice.name} (ID: ${id})`);
+    logger.info(`Device updated: ${updatedDevice.name} (ID: ${id}), Owner User ID: ${updatedDevice.owner_user_id}`);
 
     if (_broadcastWebSocket && typeof _broadcastWebSocket === 'function') {
       try {
@@ -144,8 +155,24 @@ async function updateDevice(id, updateData) {
       } catch (broadcastError) {
         logger.error('Error broadcasting device_updated event:', broadcastError);
       }
-    } else {
-      logger.debug('broadcastWebSocket not available in DeviceService for device_updated event.');
+    }
+
+    // Notify owner if owner_user_id exists and relevant fields were changed
+    if (_sendToUser && typeof _sendToUser === 'function' && updatedDevice.owner_user_id) {
+        // Check if any of the owner-relevant fields were part of the update
+        const ownerRelevantChanges = (name !== undefined || description !== undefined || type !== undefined || room_id !== undefined || owner_user_id !== undefined);
+        if(ownerRelevantChanges) {
+            try {
+                _sendToUser(updatedDevice.owner_user_id, {
+                  type: 'owned_device_update',
+                  sub_type: 'details_change',
+                  message: `Details of your device '${updatedDevice.name}' (ID: ${updatedDevice.id}) have been updated.`,
+                  data: updatedDevice // Send the full updated device object
+                });
+            } catch (targetedError) {
+                logger.error(`Error sending owned_device_update (details) to user ${updatedDevice.owner_user_id}:`, targetedError);
+            }
+        }
     }
     return updatedDevice;
   } catch (err) {
@@ -165,6 +192,10 @@ async function deleteDevice(id) {
     error.status = 400; logger.warn(error.message, { id }); throw error;
   }
   try {
+    // Fetch owner_user_id before deleting to notify them
+    const deviceDataResult = await pool.query('SELECT name, owner_user_id FROM devices WHERE id = $1', [deviceIdInt]);
+    const deviceToNotify = deviceDataResult.rows[0];
+
     const result = await pool.query('DELETE FROM devices WHERE id = $1 RETURNING *;', [deviceIdInt]);
     if (result.rows.length === 0) {
       const error = new Error('Device not found for deletion.');
@@ -179,8 +210,19 @@ async function deleteDevice(id) {
       } catch (broadcastError) {
         logger.error('Error broadcasting device_deleted event:', broadcastError);
       }
-    } else {
-      logger.debug('broadcastWebSocket not available in DeviceService for device_deleted event.');
+    }
+
+    if (_sendToUser && typeof _sendToUser === 'function' && deviceToNotify && deviceToNotify.owner_user_id) {
+      try {
+        _sendToUser(deviceToNotify.owner_user_id, {
+          type: 'owned_device_update',
+          sub_type: 'device_deleted',
+          message: `Your device '${deviceToNotify.name}' (ID: ${deletedDeviceData.id}) has been deleted.`,
+          data: { id: deletedDeviceData.id, name: deletedDeviceData.name }
+        });
+      } catch (targetedError) {
+        logger.error(`Error sending owned_device_update (deleted) to user ${deviceToNotify.owner_user_id}:`, targetedError);
+      }
     }
     return { message: 'Device deleted successfully', id: deletedDeviceData.id, name: deletedDeviceData.name };
   } catch (err) {
@@ -226,30 +268,39 @@ async function updateDeviceStatus(id, newStatus) {
       } catch (broadcastError) {
         logger.error('Error broadcasting device_status_updated event:', broadcastError);
       }
-    } else {
-      logger.debug('broadcastWebSocket not available in DeviceService for device_status_updated event.');
     }
 
-    // Send targeted message to admins
     if (_sendToRole && typeof _sendToRole === 'function') {
       try {
         _sendToRole('admin', {
           type: 'admin_device_status_alert',
           message: `Device '${updatedDeviceWithStatus.name}' (ID: ${updatedDeviceWithStatus.id}) status updated to '${updatedDeviceWithStatus.status}'.`,
           data: {
-            id: updatedDeviceWithStatus.id,
-            name: updatedDeviceWithStatus.name,
-            device_id: updatedDeviceWithStatus.device_id, // hardware ID
-            status: updatedDeviceWithStatus.status,
+            id: updatedDeviceWithStatus.id, name: updatedDeviceWithStatus.name,
+            device_id: updatedDeviceWithStatus.device_id, status: updatedDeviceWithStatus.status,
             updated_at: updatedDeviceWithStatus.updated_at,
-            // Potentially include who made the change if that info is passed to updateDeviceStatus
           }
         });
       } catch (targettedBroadcastError) {
         logger.error('Error broadcasting admin_device_status_alert event via sendToRole:', targettedBroadcastError);
       }
-    } else {
-      logger.debug('sendToRole not available in DeviceService for admin_device_status_alert event.');
+    }
+
+    if (_sendToUser && typeof _sendToUser === 'function' && updatedDeviceWithStatus.owner_user_id) {
+      try {
+        _sendToUser(updatedDeviceWithStatus.owner_user_id, {
+          type: 'owned_device_update',
+          sub_type: 'status_change',
+          message: `Status of your device '${updatedDeviceWithStatus.name}' (ID: ${updatedDeviceWithStatus.id}) changed to '${updatedDeviceWithStatus.status}'.`,
+          data: {
+            id: updatedDeviceWithStatus.id, name: updatedDeviceWithStatus.name,
+            device_id: updatedDeviceWithStatus.device_id, status: updatedDeviceWithStatus.status,
+            updated_at: updatedDeviceWithStatus.updated_at
+          }
+        });
+      } catch (targetedError) {
+        logger.error(`Error sending owned_device_update (status) to user ${updatedDeviceWithStatus.owner_user_id}:`, targetedError);
+      }
     }
     return updatedDeviceWithStatus;
   } catch (err) {
@@ -291,8 +342,23 @@ async function setDeviceConfiguration(dbDeviceId, newConfig) {
       } catch (broadcastError) {
         logger.error('Error broadcasting device_config_updated event:', broadcastError);
       }
-    } else {
-      logger.debug(`broadcastWebSocket not available in DeviceService for device_config_updated event.`);
+    }
+
+    if (_sendToUser && typeof _sendToUser === 'function' && updatedDevice.owner_user_id) {
+      try {
+        _sendToUser(updatedDevice.owner_user_id, {
+          type: 'owned_device_update',
+          sub_type: 'config_change',
+          message: `Configuration of your device '${updatedDevice.name}' (ID: ${updatedDevice.id}) has been updated.`,
+          data: {
+            id: updatedDevice.id, name: updatedDevice.name,
+            device_id: updatedDevice.device_id, config: updatedDevice.config,
+            updated_at: updatedDevice.updated_at
+          }
+        });
+      } catch (targetedError) {
+        logger.error(`Error sending owned_device_update (config) to user ${updatedDevice.owner_user_id}:`, targetedError);
+      }
     }
     return updatedDevice;
   } catch (err) {
@@ -369,7 +435,7 @@ async function getDeviceConsumptionHistory(monitoredDeviceId, queryParams = {}) 
 }
 
 module.exports = {
-  initDeviceService, // Added init function
+  initDeviceService,
   createDevice,
   getDevices,
   getDeviceById,

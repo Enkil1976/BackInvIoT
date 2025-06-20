@@ -656,9 +656,12 @@ if (app.locals.broadcastWebSocket) {
 logger.info('Initializing services with dependencies...');
 const deviceService = require('./services/deviceService');
 if (deviceService.initDeviceService) {
-  deviceService.initDeviceService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+  deviceService.initDeviceService({
+    broadcastWebSocket: app.locals.broadcastWebSocket,
+    sendToRole: app.locals.sendToRole // Add sendToRole
+  });
 } else {
-  logger.warn('initDeviceService not found on deviceService module. WebSocket broadcasts from this service may not work.');
+  logger.warn('initDeviceService not found on deviceService module. WebSocket broadcasts from this service may not work as expected.');
 }
 
 const operationService = require('./services/operationService');
