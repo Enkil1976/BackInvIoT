@@ -4,6 +4,7 @@ const logger = require('../config/logger');
 let _broadcastWebSocket = null;
 let _sendToRole = null;
 let _sendToUser = null; // For targeted user-based WebSocket messages
+let _sendToRoom = null; // For room-based WebSocket messages
 
 function initDeviceService(dependencies) {
   if (dependencies) {
@@ -19,14 +20,20 @@ function initDeviceService(dependencies) {
     } else {
       logger.warn('DeviceService: sendToRole capability NOT initialized. Targeted role-based updates will not be sent.');
     }
-    if (dependencies.sendToUser) { // New
+    if (dependencies.sendToUser) {
       _sendToUser = dependencies.sendToUser;
       logger.info('DeviceService: sendToUser capability initialized.');
     } else {
       logger.warn('DeviceService: sendToUser capability NOT initialized. Targeted user-specific updates will not be sent.');
     }
+    if (dependencies.sendToRoom) { // New
+      _sendToRoom = dependencies.sendToRoom;
+      logger.info('DeviceService: sendToRoom capability initialized.');
+    } else {
+      logger.warn('DeviceService: sendToRoom capability NOT initialized. Room-specific updates will not be sent.');
+    }
   } else {
-    logger.warn('DeviceService: No dependencies provided for initialization (broadcastWebSocket, sendToRole, sendToUser).');
+    logger.warn('DeviceService: No dependencies provided for initialization (broadcastWebSocket, sendToRole, sendToUser, sendToRoom).');
   }
 }
 
@@ -54,6 +61,13 @@ async function createDevice({ name, device_id, type, description, status, config
         _broadcastWebSocket({ type: 'device_created', data: newDevice });
       } catch (broadcastError) {
         logger.error('Error broadcasting device_created event:', broadcastError);
+      }
+    }
+    if (_sendToRoom && typeof _sendToRoom === 'function' && newDevice && newDevice.id) {
+      try {
+        _sendToRoom(`device_events:${newDevice.id}`, { type: 'device_created', data: newDevice });
+      } catch (roomSendError) {
+        logger.error(`Error sending to room device_events:${newDevice.id} for device_created event:`, roomSendError);
       }
     }
     // No specific user notification on creation yet, unless required.
@@ -156,6 +170,13 @@ async function updateDevice(id, updateData) {
         logger.error('Error broadcasting device_updated event:', broadcastError);
       }
     }
+    if (_sendToRoom && typeof _sendToRoom === 'function' && updatedDevice && updatedDevice.id) {
+      try {
+        _sendToRoom(`device_events:${updatedDevice.id}`, { type: 'device_details_updated', data: updatedDevice });
+      } catch (roomSendError) {
+        logger.error(`Error sending to room device_events:${updatedDevice.id} for device_details_updated event:`, roomSendError);
+      }
+    }
 
     // Notify owner if owner_user_id exists and relevant fields were changed
     if (_sendToUser && typeof _sendToUser === 'function' && updatedDevice.owner_user_id) {
@@ -209,6 +230,13 @@ async function deleteDevice(id) {
         _broadcastWebSocket({ type: 'device_deleted', data: { id: deletedDeviceData.id, name: deletedDeviceData.name } });
       } catch (broadcastError) {
         logger.error('Error broadcasting device_deleted event:', broadcastError);
+      }
+    }
+    if (_sendToRoom && typeof _sendToRoom === 'function' && deletedDeviceData && deletedDeviceData.id) {
+      try {
+        _sendToRoom(`device_events:${deletedDeviceData.id}`, { type: 'device_deleted', data: { id: deletedDeviceData.id, name: deletedDeviceData.name } });
+      } catch (roomSendError) {
+        logger.error(`Error sending to room device_events:${deletedDeviceData.id} for device_deleted event:`, roomSendError);
       }
     }
 
@@ -267,6 +295,13 @@ async function updateDeviceStatus(id, newStatus) {
         _broadcastWebSocket({ type: 'device_status_updated', data: updatedDeviceWithStatus });
       } catch (broadcastError) {
         logger.error('Error broadcasting device_status_updated event:', broadcastError);
+      }
+    }
+    if (_sendToRoom && typeof _sendToRoom === 'function' && updatedDeviceWithStatus && updatedDeviceWithStatus.id) {
+      try {
+        _sendToRoom(`device_events:${updatedDeviceWithStatus.id}`, { type: 'device_status_updated', data: updatedDeviceWithStatus });
+      } catch (roomSendError) {
+        logger.error(`Error sending to room device_events:${updatedDeviceWithStatus.id} for device_status_updated event:`, roomSendError);
       }
     }
 
@@ -341,6 +376,13 @@ async function setDeviceConfiguration(dbDeviceId, newConfig) {
         _broadcastWebSocket({ type: 'device_config_updated', data: updatedDevice });
       } catch (broadcastError) {
         logger.error('Error broadcasting device_config_updated event:', broadcastError);
+      }
+    }
+    if (_sendToRoom && typeof _sendToRoom === 'function' && updatedDevice && updatedDevice.id) {
+      try {
+        _sendToRoom(`device_events:${updatedDevice.id}`, { type: 'device_config_updated', data: updatedDevice });
+      } catch (roomSendError) {
+        logger.error(`Error sending to room device_events:${updatedDevice.id} for device_config_updated event:`, roomSendError);
       }
     }
 

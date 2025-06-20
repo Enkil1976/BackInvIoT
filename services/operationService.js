@@ -3,13 +3,24 @@ const logger = require('../config/logger');
 // const { app } = require('../server'); // Removed: To be replaced by DI
 
 let _broadcastWebSocket = null;
+let _sendToRoom = null; // Added for room-specific notifications
 
 function initOperationService(dependencies) {
-  if (dependencies && dependencies.broadcastWebSocket) {
-    _broadcastWebSocket = dependencies.broadcastWebSocket;
-    logger.info('OperationService initialized with broadcastWebSocket capability.');
+  if (dependencies) {
+    if (dependencies.broadcastWebSocket) {
+      _broadcastWebSocket = dependencies.broadcastWebSocket;
+      logger.info('OperationService initialized with broadcastWebSocket capability.');
+    } else {
+      logger.warn('OperationService initialized WITHOUT broadcastWebSocket capability.');
+    }
+    if (dependencies.sendToRoom) { // Added
+      _sendToRoom = dependencies.sendToRoom;
+      logger.info('OperationService initialized with sendToRoom capability.');
+    } else {
+      logger.warn('OperationService initialized WITHOUT sendToRoom capability.');
+    }
   } else {
-    logger.warn('OperationService initialized WITHOUT broadcastWebSocket capability.');
+    logger.warn('OperationService initialized WITHOUT any dependencies (broadcastWebSocket, sendToRoom).');
   }
 }
 
@@ -63,6 +74,19 @@ async function recordOperation({
       }
     } else {
        logger.debug('broadcastWebSocket not initialized in OperationService for operation_recorded event.');
+    }
+
+    if (_sendToRoom && typeof _sendToRoom === 'function') {
+      try {
+        _sendToRoom('operations_log:new', {
+          type: 'new_operation_log',
+          data: newOperationLog
+        });
+      } catch (roomSendError) {
+        logger.error('Error sending to room operations_log:new for new_operation_log event:', roomSendError);
+      }
+    } else {
+      logger.debug('sendToRoom not initialized in OperationService for new_operation_log event.');
     }
     return newOperationLog;
   } catch (err) {

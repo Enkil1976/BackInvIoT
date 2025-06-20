@@ -244,9 +244,48 @@ This application provides real-time updates and notifications via WebSockets.
     -   Upon successful authentication, the server will send a confirmation message (e.g., `{"type":"info","event":"connection_success","message":"WebSocket connection established and authenticated."}`).
     -   The authenticated user's details (ID, username, role) are associated with their WebSocket connection on the server-side, enabling targeted messaging.
 
+### Subscribing to Specific Event Streams (Rooms)
+
+Clients can send `subscribe` messages to the WebSocket server to receive targeted updates for specific event streams or "rooms."
+
+-   **Message Format (Client-to-Server):**
+    ```json
+    {
+      "type": "subscribe",
+      "room": "room_name_here"
+    }
+    ```
+    ```json
+    {
+      "type": "unsubscribe",
+      "room": "room_name_here"
+    }
+    ```
+-   **Server Response:**
+    -   On successful subscription: `{"type": "subscribed", "room": "room_name_here", "message": "..."}`
+    -   On successful unsubscription: `{"type": "unsubscribed", "room": "room_name_here", "message": "..."}`
+    -   On error (e.g., invalid room name): `{"type": "subscription_error", "room": "room_name_here", "message": "..."}`
+
+-   **Basic Keep-Alive:** Clients can send `{"type": "ping"}` and the server will respond with `{"type": "pong", "timestamp": <Date.now()>}`.
+
+#### Available Room Naming Conventions / Patterns
+
+-   **`device_events:<device_db_id>`**:
+    -   **Description:** Subscribe to events specific to a single device instance, using its database ID (e.g., `device_events:123`). This includes creation, detailed updates, status changes, configuration changes, and deletion events for that particular device.
+    -   **Event Types Published:** `device_created`, `device_details_updated`, `device_status_updated`, `device_config_updated`, `device_deleted`. (Payloads are similar to general broadcast events but are only sent to subscribers of this specific device's room).
+-   **`sensor_latest:<sensor_id>`**:
+    -   **Description:** Subscribe to this room to receive real-time updates whenever the latest cached value for a specific sensor is updated. `<sensor_id>` corresponds to the identifiers used in MQTT topics and Redis keys.
+    -   **Examples:** `sensor_latest:temhum1`, `sensor_latest:calidad_agua`, `sensor_latest:power:PS001` (for a power sensor with hardware ID `PS001`).
+    -   **Event Type Published:** `sensor_reading_updated`
+-   **`operations_log:new`**:
+    -   **Description:** Subscribe to receive a notification whenever any new operation is recorded in the `operations_log` table.
+    -   **Event Type Published:** `new_operation_log` (Payload is the full operation log entry).
+
+*(More room patterns may be added as the system evolves.)*
+
 ### Server-to-Client Event Types
 
-Clients can expect to receive messages with different `type` fields, indicating the nature of the event.
+Clients can expect to receive messages with different `type` fields, indicating the nature of the event. These can be general broadcasts or targeted to specific rooms they are subscribed to.
 
 #### General Broadcast Events
 These events are typically broadcast to all authenticated and connected WebSocket clients.
@@ -359,7 +398,68 @@ These events are typically broadcast to all authenticated and connected WebSocke
         }
         ```
 
-*(More event types may be added as the system evolves.)*
+#### Room-Specific Events
+
+These events are sent to clients who have subscribed to specific rooms.
+
+-   **Event Type:** `new_operation_log`
+    -   **Room:** `operations_log:new`
+    -   **Description:** Sent when a new entry is added to the `operations_log` table.
+    -   **Payload:** The full operation log object as stored in the database.
+
+-   **Event Type:** `sensor_reading_updated`
+    -   **Room Pattern:** `sensor_latest:<sensor_id>` (e.g., `sensor_latest:temhum1`)
+    -   **Description:** Published to a specific `sensor_latest:<sensor_id>` room when new data for that sensor is processed and its latest values are updated in the cache.
+    -   **Payload Fields:**
+        -   `type: "sensor_reading_updated"`
+        -   `sensor_id: "<sensor_id>"` (The ID of the sensor that was updated, e.g., "temhum1", "calidad_agua", "power:PS001")
+        -   `data: Object` (The complete hash of latest values for that sensor, as stored in Redis. Timestamps like `last_updated` are typically ISO8601 strings).
+    -   **Payload Example (for `sensor_latest:temhum1`):**
+        ```json
+        {
+          "type": "sensor_reading_updated",
+          "sensor_id": "temhum1",
+          "data": {
+            "temperatura": 25.5,
+            "humedad": 60.1,
+            "heatindex": 26.0,
+            "dewpoint": 18.2,
+            "rssi": -65,
+            "last_updated": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+    -   **Payload Example (for `sensor_latest:calidad_agua`):**
+        ```json
+        {
+          "type": "sensor_reading_updated",
+          "sensor_id": "calidad_agua",
+          "data": {
+            "ph": 7.1,
+            "ec": 1500,
+            "ppm": 750,
+            "temperatura_agua": 22.5,
+            "last_updated_multiparam": "YYYY-MM-DDTHH:MM:SS.mmmZ",
+            "last_updated_temp_agua": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+    -   **Payload Example (for `sensor_latest:power:PS001`):**
+        ```json
+        {
+          "type": "sensor_reading_updated",
+          "sensor_id": "power:PS001",
+          "data": {
+            "voltage": 220.1,
+            "current": 0.5,
+            "power": 110.05,
+            "sensor_timestamp": "YYYY-MM-DDTHH:MM:SS.mmmZ", // Optional, from sensor
+            "last_updated": "YYYY-MM-DDTHH:MM:SS.mmmZ"    // Timestamp of server receipt/processing
+          }
+        }
+        ```
+
+*(More event types and room patterns may be added as the system evolves.)*
 
 ### Manual Testing Guidelines for WebSockets
 
@@ -436,6 +536,125 @@ This test verifies that the `owned_device_update` WebSocket event is sent specif
         -   **Client 3 (Admin):** Should receive general `device_deleted`.
 
 9.  **Disconnect Clients:** Close all WebSocket connections.
+
+#### Testing Subscriptions to Latest Sensor Data Rooms (`sensor_latest:<sensor_id>`)
+
+This test verifies that clients can subscribe to rooms for specific sensor updates and receive `sensor_reading_updated` events when new data for those sensors is processed by `mqttService.js` and cached in Redis.
+
+**Prerequisites:**
+-   The backend server is running, including the WebSocket server and MQTT client.
+-   You have a WebSocket client tool capable of sending JSON messages (for subscribe/unsubscribe) and receiving messages.
+-   You have an MQTT client tool to publish test messages for sensors.
+-   Ensure JWT authentication is set up for WebSocket connections.
+
+**Test Steps:**
+
+1.  **Connect WebSocket Client:**
+    -   Establish an authenticated WebSocket connection (e.g., `ws://localhost:4000?token=YOUR_JWT`).
+    -   Verify successful connection and authentication.
+
+2.  **Subscribe to a Specific Sensor Room (e.g., `temhum1`):**
+    -   Send a WebSocket message from the client:
+        ```json
+        {
+          "type": "subscribe",
+          "room": "sensor_latest:temhum1"
+        }
+        ```
+    -   **Verify Client Receives Confirmation:** The client should receive:
+        ```json
+        {
+          "type": "subscribed",
+          "room": "sensor_latest:temhum1",
+          "message": "Successfully subscribed to room 'sensor_latest:temhum1'."
+        }
+        ```
+    -   **Verify Server Log (Optional):** Check backend logs for `WebSocket: User <username> subscribed to room 'sensor_latest:temhum1'. Room size: ...`
+
+3.  **Subscribe to Another Sensor Room (e.g., `calidad_agua`):**
+    -   Send another WebSocket message from the same client:
+        ```json
+        {
+          "type": "subscribe",
+          "room": "sensor_latest:calidad_agua"
+        }
+        ```
+    -   Verify client receives confirmation for this new subscription.
+
+4.  **Publish MQTT Data for `temhum1`:**
+    -   Using an MQTT client, publish to topic `Invernadero/TemHum1/data`:
+        ```json
+        {"temperatura": 25.5, "humedad": 60, "heatindex": 26, "dewpoint": 18, "rssi": -55, "stats": {"tmin": 0, "tmax":0, "tavg":0, "hmin":0, "hmax":0, "havg":0, "total":0, "errors":0}, "boot":0, "mem":0}
+        ```
+    -   **Verify WebSocket Client (for `temhum1`):** The connected WebSocket client should receive a message like:
+        ```json
+        {
+          "type": "sensor_reading_updated",
+          "sensor_id": "temhum1",
+          "data": {
+            "temperatura": "25.5",
+            "humedad": "60",
+            "heatindex": "26",
+            "dewpoint": "18",
+            "rssi": "-55",
+            "last_updated": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+    -   (The client should NOT receive this message if it wasn't subscribed to `sensor_latest:temhum1`).
+
+5.  **Publish MQTT Data for `calidad_agua`:**
+    -   Publish to topic `Invernadero/Agua/data`:
+        ```json
+        {"ph": 7.2, "ec": 1550, "ppm": 775, "temp": 22.3}
+        ```
+    -   **Verify WebSocket Client (for `calidad_agua`):** The client (if subscribed to `sensor_latest:calidad_agua`) should receive:
+        ```json
+        {
+          "type": "sensor_reading_updated",
+          "sensor_id": "calidad_agua",
+          "data": {
+            "ph": "7.2",
+            "ec": "1550",
+            "ppm": "775",
+            "temperatura_agua": "22.3",
+            "last_updated_multiparam": "YYYY-MM-DDTHH:MM:SS.mmmZ"
+          }
+        }
+        ```
+
+6.  **Publish MQTT Data for an Unsubscribed Sensor (e.g., `power:PS001`):**
+    -   Publish to topic `Invernadero/PS001/data` (assuming client is not subscribed to `sensor_latest:power:PS001` and a device with hardware ID `PS001` and type `power_sensor` exists and is configured to monitor another device):
+        ```json
+        {"voltage": 220.0, "current": 1.5, "power": 330.0, "sensor_timestamp": "YYYY-MM-DDTHH:MM:SS.mmmZ"}
+        ```
+    -   **Verify WebSocket Client:** The client should NOT receive any `sensor_reading_updated` message for `power:PS001`.
+
+7.  **Unsubscribe from a Room (e.g., `sensor_latest:temhum1`):**
+    -   Send a WebSocket message from the client:
+        ```json
+        {
+          "type": "unsubscribe",
+          "room": "sensor_latest:temhum1"
+        }
+        ```
+    -   **Verify Client Receives Confirmation:**
+        ```json
+        {
+          "type": "unsubscribed",
+          "room": "sensor_latest:temhum1",
+          "message": "Successfully unsubscribed from room 'sensor_latest:temhum1'."
+        }
+        ```
+8.  **Publish MQTT Data for `temhum1` Again:**
+    -   Publish new data to `Invernadero/TemHum1/data`.
+    -   **Verify WebSocket Client:** The client should NO LONGER receive `sensor_reading_updated` messages for `temhum1`. It should still receive them for `calidad_agua` if still subscribed.
+
+9.  **Test Disconnection:**
+    -   Disconnect the WebSocket client.
+    -   Publish more MQTT data for a previously subscribed room (e.g., `calidad_agua`).
+    -   Reconnect the client (re-authenticate, re-subscribe). It should not receive the messages sent while it was disconnected (unless a "catch-up" mechanism is built, which is not part of this feature).
+    -   Verify server logs show client removal from rooms on disconnect.
 
 ## Device Management
 (Content as previously verified)

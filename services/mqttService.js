@@ -2,7 +2,9 @@ const mqtt = require('mqtt');
 const pool = require('../config/db');
 const logger = require('../config/logger');
 const redisClient = require('../config/redis'); // Import Redis client
+const EventEmitter = require('events');
 
+const mqttEvents = new EventEmitter();
 const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH, 10) || 100;
 
 // Environment variables for MQTT connection (ensure these are set in your .env file)
@@ -166,12 +168,18 @@ const handleIncomingMessage = async (topic, message) => {
       const sensorKeyLatestTemHum = `sensor_latest:${tableName}`;
       logger.debug(`MQTT Handler: Attempting Redis update for TemHum sensor ${tableName} using key ${sensorKeyLatestTemHum}`);
       try {
-        await redisClient.hmset(sensorKeyLatestTemHum,
-          'temperatura', data.temperatura, 'humedad', data.humedad,
-          'heatindex', data.heatindex, 'dewpoint', data.dewpoint,
-          'rssi', data.rssi, 'last_updated', receivedAt.toISOString()
-        );
+        const latestValuesForEvent = {
+            temperatura: data.temperatura, humedad: data.humedad,
+            heatindex: data.heatindex, dewpoint: data.dewpoint,
+            rssi: data.rssi, last_updated: receivedAt.toISOString()
+        };
+        await redisClient.hmset(sensorKeyLatestTemHum, latestValuesForEvent);
         logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyLatestTemHum}`);
+
+        mqttEvents.emit('sensor_latest_update', {
+            sensorId: tableName, // e.g., "temhum1", "temhum2"
+            data: latestValuesForEvent
+        });
 
         const metricsToCacheHistory = ['temperatura', 'humedad', 'heatindex', 'dewpoint', 'rssi'];
         for (const metric of metricsToCacheHistory) {
@@ -222,6 +230,11 @@ const handleIncomingMessage = async (topic, message) => {
           await redisClient.hmset(sensorKeyAguaData, redisPayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaData} (multi-param)`);
 
+          mqttEvents.emit('sensor_latest_update', {
+              sensorId: 'calidad_agua', // Fixed identifier for this group
+              data: redisPayload // The object that was just set in Redis
+          });
+
           const paramsToLogHistory = ['ph', 'ec', 'ppm'];
           if (data.temp !== undefined) { // Check for data.temp for history logging decision
             paramsToLogHistory.push('temperatura_agua'); // Logged under metric 'temperatura_agua'
@@ -264,8 +277,17 @@ const handleIncomingMessage = async (topic, message) => {
         const sensorKeyAguaTemp = `sensor_latest:calidad_agua`;
         logger.debug(`MQTT Handler: Attempting Redis update for Agua/Temperatura using key ${sensorKeyAguaTemp}`);
         try {
-          await redisClient.hmset(sensorKeyAguaTemp, 'temperatura_agua', waterTemp, 'last_updated_temp_agua', receivedAt.toISOString());
+          const redisUpdatePayload = {
+            'temperatura_agua': waterTemp,
+            'last_updated_temp_agua': receivedAt.toISOString()
+          };
+          await redisClient.hmset(sensorKeyAguaTemp, redisUpdatePayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaTemp} (temp_agua)`);
+
+          mqttEvents.emit('sensor_latest_update', {
+              sensorId: 'calidad_agua', // Still affects the 'calidad_agua' sensor data object
+              data: redisUpdatePayload // Event data shows what changed
+          });
 
           const tempListKey = `sensor_history:calidad_agua:temperatura_agua`;
           const tempDataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: waterTemp });
@@ -327,6 +349,11 @@ const handleIncomingMessage = async (topic, message) => {
             await redisClient.hmset(sensorKeyPower, redisPayload);
             logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyPower}`);
 
+            mqttEvents.emit('sensor_latest_update', {
+                sensorId: `power:${powerSensorHardwareId}`, // Matches Redis key part
+                data: redisPayload
+            });
+
             const metricsToLogHistory = ['voltage', 'current', 'power'];
             for (const metric of metricsToLogHistory) {
                 if (data[metric] !== undefined) {
@@ -382,5 +409,6 @@ const disconnectMqtt = () => {
 module.exports = {
   connectMqtt,
   disconnectMqtt,
+  mqttEvents, // Export the event emitter
   // handleIncomingMessage will be called internally by the client.on('message')
 };
