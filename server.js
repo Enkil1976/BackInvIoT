@@ -5,7 +5,7 @@ const Redis = require('ioredis');
 const cors = require('cors');
 const moment = require('moment');
 const winston = require('winston');
-const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
+const { connectMqtt, disconnectMqtt, mqttEvents } = require('./services/mqttService'); // Import mqttEvents
 const WebSocket = require('ws'); // Require WebSocket library
 const { startScheduler, stopScheduler } = require('./services/schedulerEngineService'); // Import scheduler functions
 const { startRulesEngine, stopRulesEngine } = require('./services/rulesEngineService'); // Import rules engine functions
@@ -474,6 +474,7 @@ const server = app.listen(PORT, () => {
 // WebSocket Server Setup
 const wss = new WebSocket.Server({ server });
 app.locals.wss = wss; // Make wss available in app.locals for shutdown and broadcasting
+app.locals.wsSubscriptions = new Map(); // Map<roomName, Set<WebSocketClient>>
 
 wss.on('connection', (ws, req) => {
   const clientIp = req.socket.remoteAddress || req.headers['x-forwarded-for'];
@@ -504,28 +505,76 @@ wss.on('connection', (ws, req) => {
 
     logger.info(`WebSocket: Client authenticated and connected: User ${ws.user.username} (ID: ${ws.user.id}, Role: ${ws.user.role}) from ${clientIp}`);
 
-    // Original connection logic (welcome message, event handlers)
-    ws.on('message', (message) => {
+    // WebSocket message handler with subscription logic
+    ws.on('message', (messageString) => {
+      let parsedMessage;
       try {
-        const parsedMessage = JSON.parse(message); // Assume clients send JSON
+        // Ensure messageString is treated as string before parsing
+        parsedMessage = JSON.parse(messageString.toString());
         logger.info(`WebSocket: Received message from ${ws.user.username}: %j`, parsedMessage);
-        // TODO: Handle authenticated client messages if any specific actions are needed
-        // e.g., client pings, subscriptions to specific event types from this user
-        // Example: ws.send(JSON.stringify({ type: 'ack', original_payload: parsedMessage }));
       } catch (e) {
-        // Handle non-JSON messages or messages with parsing errors
-        if (message instanceof Buffer) {
-            const rawMessage = message.toString();
-            logger.warn(`WebSocket: Received non-JSON binary/text message from ${ws.user.username}: ${rawMessage.substring(0,100)}...`);
-        } else {
-            logger.warn(`WebSocket: Received non-JSON message from ${ws.user.username}: ${message}`);
+        logger.warn(`WebSocket: Received non-JSON message from ${ws.user.username}: ${messageString.toString().substring(0,100)}...`);
+        ws.send(JSON.stringify({ type: 'error', event: 'invalid_message_format', message: 'Message must be valid JSON.'}));
+        return;
+      }
+
+      if (parsedMessage.type === 'subscribe' && parsedMessage.room && typeof parsedMessage.room === 'string') {
+        const roomName = parsedMessage.room;
+        // Basic validation for room name format (can be expanded)
+        if (!roomName.match(/^(device_events:\w+|sensor_latest:[\w:-]+|operations_log:new)$/)) {
+          logger.warn(`WebSocket: User ${ws.user.username} attempted to subscribe to invalid room format: '${roomName}'`);
+          ws.send(JSON.stringify({ type: 'subscription_error', room: roomName, message: 'Invalid room name format or unsupported room.' }));
+          return;
         }
+
+        if (!app.locals.wsSubscriptions.has(roomName)) {
+          app.locals.wsSubscriptions.set(roomName, new Set());
+        }
+        app.locals.wsSubscriptions.get(roomName).add(ws);
+        logger.info(`WebSocket: User ${ws.user.username} subscribed to room '${roomName}'. Room size: ${app.locals.wsSubscriptions.get(roomName).size}`);
+        ws.send(JSON.stringify({ type: 'subscribed', room: roomName, message: `Successfully subscribed to room '${roomName}'.` }));
+
+      } else if (parsedMessage.type === 'unsubscribe' && parsedMessage.room && typeof parsedMessage.room === 'string') {
+        const roomName = parsedMessage.room;
+        if (app.locals.wsSubscriptions.has(roomName)) {
+          const room = app.locals.wsSubscriptions.get(roomName);
+          room.delete(ws);
+          logger.info(`WebSocket: User ${ws.user.username} unsubscribed from room '${roomName}'. New room size: ${room.size}`);
+          if (room.size === 0) { // Optional: clean up empty rooms
+              // logger.debug(`WebSocket: Room '${roomName}' is now empty. Removing from subscriptions map.`);
+              // app.locals.wsSubscriptions.delete(roomName);
+          }
+        } else {
+          logger.warn(`WebSocket: User ${ws.user.username} attempted to unsubscribe from non-existent or empty room '${roomName}'.`);
+        }
+        ws.send(JSON.stringify({ type: 'unsubscribed', room: roomName, message: `Successfully unsubscribed from room '${roomName}'.` }));
+
+      } else if (parsedMessage.type === 'ping') { // Basic keep-alive
+          ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+      } else {
+        logger.warn(`WebSocket: Received unhandled message type from ${ws.user.username}: %j`, parsedMessage);
+        // Optional: send an error back for unhandled types
+        // ws.send(JSON.stringify({ type: 'error', event: 'unknown_message_type', message: `Unknown message type: '${parsedMessage.type}'`}));
       }
     });
 
     ws.on('close', (code, reason) => {
       const reasonText = reason instanceof Buffer ? reason.toString() : reason;
-      logger.info(`WebSocket: Client disconnected: User ${ws.user?.username || 'Unknown (pre-auth or error)'} (ID: ${ws.user?.id}). Code: ${code}, Reason: ${reasonText || 'No reason given'}`);
+      logger.info(`WebSocket: Client disconnected: User ${ws.user?.username || 'Unknown'} (ID: ${ws.user?.id}). Code: ${code}, Reason: ${reasonText || 'No reason given'}`);
+
+      // Remove client from all subscribed rooms
+      if (app.locals.wsSubscriptions) {
+        app.locals.wsSubscriptions.forEach((roomSet, roomName) => {
+          if (roomSet.has(ws)) {
+            roomSet.delete(ws);
+            logger.info(`WebSocket: Removed user ${ws.user?.username} from room '${roomName}' on disconnect. New room size: ${roomSet.size}`);
+            if (roomSet.size === 0) {
+                // logger.debug(`WebSocket: Room '${roomName}' is now empty after disconnect. Removing from subscriptions map.`);
+                // app.locals.wsSubscriptions.delete(roomName);
+            }
+          }
+        });
+      }
     });
 
     ws.on('error', (error) => {
@@ -599,6 +648,56 @@ app.locals.sendToUser = (userId, messageObject) => {
 };
 
 /**
+ * Sends a message to all WebSocket clients subscribed to a specific room.
+ * @param {string} roomName - The name of the room to target.
+ * @param {object} messageObject - The message object to send (will be stringified).
+ * @returns {number} The number of clients the message was successfully sent to.
+ */
+app.locals.sendToRoom = (roomName, messageObject) => {
+  if (!app.locals.wss || !app.locals.wsSubscriptions) {
+    logger.error('WebSocket server (wss) or subscriptions map not initialized. Cannot send to room.');
+    return 0;
+  }
+  if (!roomName || typeof roomName !== 'string' || roomName.trim() === '') {
+    logger.warn('sendToRoom called with invalid or missing roomName.');
+    return 0;
+  }
+
+  const room = app.locals.wsSubscriptions.get(roomName);
+  if (!room || room.size === 0) {
+    logger.debug(`sendToRoom: No clients subscribed to room '${roomName}' or room does not exist.`);
+    return 0;
+  }
+
+  const messageString = JSON.stringify(messageObject);
+  let sentCount = 0;
+  logger.info(`Attempting to send WebSocket message to room '${roomName}' (Subscribers: ${room.size}). Message (preview): ${messageString.substring(0,150)}...`);
+
+  room.forEach((client) => {
+    // Ensure client.user is checked as it's set after successful auth
+    if (client.readyState === WebSocket.OPEN && client.user) {
+      try {
+        client.send(messageString);
+        sentCount++;
+      } catch (error) {
+        logger.error(`Error sending message to WebSocket client in room '${roomName}' (User: ${client.user.username} ID: ${client.user.id}):`, error);
+      }
+    } else if (client.readyState !== WebSocket.OPEN) {
+        logger.warn(`sendToRoom: Client in room '${roomName}' (User: ${client.user?.username}) not in OPEN state (State: ${client.readyState}). Skipping.`);
+    } else if (!client.user) {
+        logger.warn(`sendToRoom: Client in room '${roomName}' without user object (likely pre-auth or error during auth). Skipping.`);
+    }
+  });
+
+  if (sentCount > 0) {
+    logger.info(`Message successfully sent to ${sentCount} client(s) in room '${roomName}'.`);
+  } else {
+    logger.info(`Message not sent to any clients in room '${roomName}' (possibly no clients in OPEN state or other issues).`);
+  }
+  return sentCount;
+};
+
+/**
  * Sends a message to all WebSocket clients authenticated with a specific role.
  * @param {string} role - The role to target (e.g., 'admin', 'editor').
  * @param {object} messageObject - The message object to send (will be stringified).
@@ -636,6 +735,22 @@ app.locals.sendToRole = (role, messageObject) => {
 
 logger.info('✅ WebSocket server initialized and attached to HTTP server.');
 
+// Set up MQTT Event Listener for sensor_latest_update
+if (mqttEvents && app.locals.sendToRoom) {
+  mqttEvents.on('sensor_latest_update', ({ sensorId, data }) => {
+    const roomName = `sensor_latest:${sensorId}`;
+    logger.info(`Event: 'sensor_latest_update' for sensorId '${sensorId}'. Publishing to WebSocket room '${roomName}'.`);
+    app.locals.sendToRoom(roomName, {
+      type: 'sensor_reading_updated', // Event type for WebSocket clients
+      sensor_id: sensorId,
+      data: data // The latest values that were set in Redis
+    });
+  });
+  logger.info('MQTT Event listener for "sensor_latest_update" is set up for WebSocket broadcasts.');
+} else {
+  logger.warn('Could not set up MQTT event listener for WebSockets: mqttEvents or app.locals.sendToRoom missing.');
+}
+
 // Start the scheduler engine
 startScheduler();
 
@@ -658,7 +773,8 @@ const deviceService = require('./services/deviceService');
 if (deviceService.initDeviceService) {
   deviceService.initDeviceService({
     broadcastWebSocket: app.locals.broadcastWebSocket,
-    sendToRole: app.locals.sendToRole // Add sendToRole
+    sendToRole: app.locals.sendToRole, // Add sendToRole
+    sendToRoom: app.locals.sendToRoom // Add sendToRoom
   });
 } else {
   logger.warn('initDeviceService not found on deviceService module. WebSocket broadcasts from this service may not work as expected.');
@@ -666,27 +782,39 @@ if (deviceService.initDeviceService) {
 
 const operationService = require('./services/operationService');
 if (operationService.initOperationService) {
-  operationService.initOperationService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+  operationService.initOperationService({
+    broadcastWebSocket: app.locals.broadcastWebSocket,
+    sendToRoom: app.locals.sendToRoom // Add sendToRoom for operations_log:new
+  });
 } else {
   logger.warn('initOperationService not found on operationService module. WebSocket broadcasts from this service may not work.');
 }
 
 const rulesEngineActualService = require('./services/rulesEngineService'); // Renamed to avoid conflict with startRulesEngine
 if (rulesEngineActualService.initRulesEngineService) {
-  rulesEngineActualService.initRulesEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+  rulesEngineActualService.initRulesEngineService({
+    broadcastWebSocket: app.locals.broadcastWebSocket,
+    sendToRoom: app.locals.sendToRoom // Add sendToRoom for potential rule-specific rooms
+  });
 } else {
   logger.warn('initRulesEngineService not found on rulesEngineService module. WebSocket broadcasts from this service may not work.');
 }
 
 const schedulerEngineService = require('./services/schedulerEngineService'); // Renamed to avoid conflict
 if (schedulerEngineService.initSchedulerEngineService) {
-  schedulerEngineService.initSchedulerEngineService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+  schedulerEngineService.initSchedulerEngineService({
+    broadcastWebSocket: app.locals.broadcastWebSocket,
+    sendToRoom: app.locals.sendToRoom // Add sendToRoom for potential schedule-specific rooms
+  });
 } else {
   logger.warn('initSchedulerEngineService not found on schedulerEngineService module. WebSocket broadcasts from this service may not work.');
 }
 
 if (notificationService.initNotificationService) {
-  notificationService.initNotificationService({ broadcastWebSocket: app.locals.broadcastWebSocket });
+  notificationService.initNotificationService({
+    broadcastWebSocket: app.locals.broadcastWebSocket,
+    sendToRoom: app.locals.sendToRoom // Add sendToRoom for notification rooms
+  });
 } else {
   logger.warn('initNotificationService not found on notificationService module.');
 }
