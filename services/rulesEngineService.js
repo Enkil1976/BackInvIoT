@@ -200,6 +200,149 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
     if (!clause.source_id || !clause.metric || !clause.aggregator || !clause.operator || clause.value === undefined) {
       logger.warn(`RulesEngine: Rule ${ruleId}, sensor_history clause missing common required fields. Clause:`, clause);
       return false;
+    } else if (clause.source_type === 'sensor_sustained_state') {
+      // Validate common fields
+      if (!clause.source_id || !clause.metric || !clause.comparison_operator || clause.comparison_value === undefined ||
+          !clause.operator || clause.value === undefined || (!clause.time_window && !clause.samples)) {
+        logger.warn(`RulesEngine: Rule ${ruleId}, sensor_sustained_state clause missing required fields. Clause:`, clause);
+        return false;
+      }
+
+      const listKey = `sensor_history:${clause.source_id}:${clause.metric}`;
+      let dataPointsInWindow = []; 
+
+      try {
+        const rawSamples = await redisClient.lrange(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1); 
+        
+        if (!rawSamples || rawSamples.length === 0) {
+          logger.debug(`RulesEngine: Rule ${ruleId}, no history data found for ${listKey} for sustained state analysis.`);
+          return false; 
+        }
+
+        const parsedSamples = rawSamples.map(s => {
+          try {
+            const point = JSON.parse(s);
+            if (point.val === undefined || typeof point.ts !== 'string') return null;
+            const timestamp = new Date(point.ts).getTime();
+            if (isNaN(timestamp)) return null;
+            return { ts: timestamp, val: point.val }; 
+          } catch (e) {
+            logger.warn(`RulesEngine: Rule ${ruleId}, error parsing historical data point '${s}' from ${listKey}: ${e.message}`);
+            return null;
+          }
+        }).filter(p => p !== null); 
+
+        if (clause.time_window) {
+          const durationMs = parseDurationToMs(clause.time_window);
+          if (durationMs === null || durationMs <= 0) {
+            logger.warn(`RulesEngine: Rule ${ruleId}, invalid time_window '${clause.time_window}'. Clause:`, clause);
+            return false;
+          }
+          const windowStartTimeEpochMs = Date.now() - durationMs;
+          dataPointsInWindow = parsedSamples.filter(p => p.ts >= windowStartTimeEpochMs);
+          
+          if (dataPointsInWindow.length === 0) {
+              logger.debug(`RulesEngine: Rule ${ruleId}, no data points in time_window '${clause.time_window}' for ${listKey}.`);
+              return false; 
+          }
+        } else { // clause.samples
+          const samplesToConsider = parseInt(clause.samples, 10);
+          if (isNaN(samplesToConsider) || samplesToConsider <= 0) {
+            logger.warn(`RulesEngine: Rule ${ruleId}, 'samples' is not valid: '${clause.samples}'. Clause:`, clause);
+            return false;
+          }
+          if (parsedSamples.length < samplesToConsider) {
+            logger.debug(`RulesEngine: Rule ${ruleId}, not enough valid samples (${parsedSamples.length}) for ${listKey} to meet required ${samplesToConsider}.`);
+            return false; 
+          }
+          dataPointsInWindow = parsedSamples.slice(0, samplesToConsider); 
+        }
+
+        if (dataPointsInWindow.length === 0) { 
+            logger.debug(`RulesEngine: Rule ${ruleId}, no data points available for sustained state check for ${listKey} after filtering.`);
+            return false;
+        }
+        
+        logger.debug(`RulesEngine: Rule ${ruleId}, checking sustained state for ${listKey} with ${dataPointsInWindow.length} points. Condition: each point.val ${clause.comparison_operator} ${clause.comparison_value}`);
+
+        let stateWasSustained = true; 
+        for (const point of dataPointsInWindow) {
+          let actualValue = point.val;
+          let comparisonRuleValue = clause.comparison_value;
+          let currentPointConditionMet = false;
+
+          if (['>', '<', '>=', '<='].includes(clause.comparison_operator)) {
+            actualValue = parseFloat(actualValue);
+            comparisonRuleValue = parseFloat(comparisonRuleValue);
+            if (isNaN(actualValue) || isNaN(comparisonRuleValue)) {
+              logger.warn(`RulesEngine: Rule ${ruleId}, non-numeric value for numerical comparison in sustained state. Actual: '${point.val}', RuleValue: '${clause.comparison_value}'.`);
+              stateWasSustained = false; break;
+            }
+          } else if (clause.comparison_operator === '==' || clause.comparison_operator === '===') {
+              const ruleValNum = parseFloat(comparisonRuleValue);
+              if (!isNaN(ruleValNum) && typeof comparisonRuleValue !== 'boolean' && typeof comparisonRuleValue !== 'string') { 
+                  actualValue = parseFloat(actualValue);
+                  if (isNaN(actualValue)) {
+                      logger.warn(`RulesEngine: Rule ${ruleId}, actual value '${point.val}' is not numeric for '==' comparison with number '${comparisonRuleValue}'.`);
+                      stateWasSustained = false; break;
+                  }
+                  comparisonRuleValue = ruleValNum;
+              } else { 
+                  actualValue = String(actualValue);
+                  comparisonRuleValue = String(comparisonRuleValue);
+              }
+          } else if (clause.comparison_operator === '!=' || clause.comparison_operator === '!==') {
+              const ruleValNum = parseFloat(comparisonRuleValue);
+              if (!isNaN(ruleValNum) && typeof comparisonRuleValue !== 'boolean' && typeof comparisonRuleValue !== 'string') {
+                  actualValue = parseFloat(actualValue);
+                  if (isNaN(actualValue)) {
+                      logger.warn(`RulesEngine: Rule ${ruleId}, actual value '${point.val}' is not numeric for '!=' comparison with number '${comparisonRuleValue}'.`);
+                      stateWasSustained = false; break;
+                  }
+                  comparisonRuleValue = ruleValNum;
+              } else {
+                  actualValue = String(actualValue);
+                  comparisonRuleValue = String(comparisonRuleValue);
+              }
+          }
+
+          switch (clause.comparison_operator) {
+            case '>': currentPointConditionMet = actualValue > comparisonRuleValue; break;
+            case '<': currentPointConditionMet = actualValue < comparisonRuleValue; break;
+            case '>=': currentPointConditionMet = actualValue >= comparisonRuleValue; break;
+            case '<=': currentPointConditionMet = actualValue <= comparisonRuleValue; break;
+            case '==': case '===': currentPointConditionMet = actualValue === comparisonRuleValue; break;
+            case '!=': case '!==': currentPointConditionMet = actualValue !== comparisonRuleValue; break;
+            default: 
+              logger.warn(`RulesEngine: Rule ${ruleId}, unsupported comparison_operator '${clause.comparison_operator}' for sustained state. Clause:`, clause);
+              stateWasSustained = false; 
+              break;
+          }
+
+          if (!currentPointConditionMet || !stateWasSustained) { 
+            stateWasSustained = false;
+            logger.debug(`RulesEngine: Rule ${ruleId}, sustained state check failed for point: ${JSON.stringify(point)} against comparison_value: ${clause.comparison_value} with operator ${clause.comparison_operator}`);
+            break; 
+          }
+        }
+        
+        logger.debug(`RulesEngine: Rule ${ruleId}, sensor_state_sustained ('${clause.comparison_operator}' '${clause.comparison_value}') detected as: ${stateWasSustained} for ${listKey}.`);
+
+        const expectedBooleanRuleOutcome = String(clause.value).toLowerCase() === 'true';
+        let finalClauseOutcome = false;
+        if (clause.operator === 'is' || clause.operator === '==' || clause.operator === '===') {
+          finalClauseOutcome = (stateWasSustained === expectedBooleanRuleOutcome);
+        } else if (clause.operator === 'isnot' || clause.operator === '!=' || clause.operator === '!==') {
+          finalClauseOutcome = (stateWasSustained !== expectedBooleanRuleOutcome);
+        } else {
+          logger.warn(`RulesEngine: Rule ${ruleId}, unsupported main operator '${clause.operator}' for sensor_sustained_state. Defaulting to false.`);
+        }
+        return finalClauseOutcome;
+
+      } catch (error) {
+        logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_sustained_state clause for ${listKey}: ${error.message}`, { stack: error.stack });
+        return false;
+      }
     }
 
     const listKey = `sensor_history:${clause.source_id}:${clause.metric}`;
@@ -410,17 +553,17 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
     }
   } else if (clause.source_type === 'sensor_heartbeat') {
     if (!clause.source_id || !clause.max_inactivity || !clause.operator || clause.value === undefined) {
-      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_heartbeat clause missing required fields (source_id, max_inactivity, operator, value). Clause:\`, clause);
+      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_heartbeat clause missing required fields (source_id, max_inactivity, operator, value). Clause:`, clause);
       return false;
     }
 
-    const redisKey = \`sensor_latest:\${clause.source_id}\`;
+    const redisKey = `sensor_latest:${clause.source_id}`;
     let isInactiveDueToTimeout = false;
 
     try {
       const maxInactivityMs = parseDurationToMs(clause.max_inactivity);
       if (maxInactivityMs === null || maxInactivityMs <= 0) {
-        logger.warn(\`RulesEngine: Rule ${ruleId}, invalid max_inactivity format or value '\${clause.max_inactivity}'. Clause:\`, clause);
+        logger.warn(`RulesEngine: Rule ${ruleId}, invalid max_inactivity format or value '${clause.max_inactivity}'. Clause:`, clause);
         return false;
       }
 
@@ -428,16 +571,16 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
 
       if (!lastUpdatedStr) {
         isInactiveDueToTimeout = true; // Sensor never reported or 'last_updated' field missing
-        logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': No 'last_updated' field found in Redis for key '\${redisKey}'. Considered inactive.\`);
+        logger.debug(`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '${clause.source_id}': No 'last_updated' field found in Redis for key '${redisKey}'. Considered inactive.`);
       } else {
         const lastUpdatedEpochMs = new Date(lastUpdatedStr).getTime();
         if (isNaN(lastUpdatedEpochMs)) {
           isInactiveDueToTimeout = true; // Invalid date string, treat as if never updated for safety
-          logger.warn(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': Invalid date string for 'last_updated' in Redis: '\${lastUpdatedStr}'. Key '\${redisKey}'. Considered inactive.\`);
+          logger.warn(`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '${clause.source_id}': Invalid date string for 'last_updated' in Redis: '${lastUpdatedStr}'. Key '${redisKey}'. Considered inactive.`);
         } else {
           const elapsedTimeMs = Date.now() - lastUpdatedEpochMs;
           isInactiveDueToTimeout = (elapsedTimeMs > maxInactivityMs);
-          logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': Last update was \${(elapsedTimeMs / 1000).toFixed(1)}s ago. Max inactivity allowed is \${(maxInactivityMs / 1000).toFixed(1)}s. IsInactiveDueToTimeout: \${isInactiveDueToTimeout}\`);
+          logger.debug(`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '${clause.source_id}': Last update was ${(elapsedTimeMs / 1000).toFixed(1)}s ago. Max inactivity allowed is ${(maxInactivityMs / 1000).toFixed(1)}s. IsInactiveDueToTimeout: ${isInactiveDueToTimeout}`);
         }
       }
 
@@ -451,13 +594,13 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
       } else if (clause.operator === 'isnot' || clause.operator === '!=' || clause.operator === '!==') {
         finalClauseOutcome = (isInactiveDueToTimeout !== expectedRuleOutcomeForInactivity);
       } else {
-        logger.warn(\`RulesEngine: Rule ${ruleId}, unsupported operator '\${clause.operator}' for sensor_heartbeat. Defaulting to false.\`);
+        logger.warn(`RulesEngine: Rule ${ruleId}, unsupported operator '${clause.operator}' for sensor_heartbeat. Defaulting to false.`);
       }
-      logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat ('\${clause.source_id}' inactive for >\${clause.max_inactivity} is \${isInactiveDueToTimeout}) \${clause.operator} \${expectedRuleOutcomeForInactivity}. Final clause outcome: \${finalClauseOutcome}\`);
+      logger.debug(`RulesEngine: Rule ${ruleId}, sensor_heartbeat ('${clause.source_id}' inactive for >${clause.max_inactivity} is ${isInactiveDueToTimeout}) ${clause.operator} ${expectedRuleOutcomeForInactivity}. Final clause outcome: ${finalClauseOutcome}`);
       return finalClauseOutcome;
 
     } catch (error) {
-      logger.error(\`RulesEngine: Rule ${ruleId}, error processing sensor_heartbeat clause for key '\${redisKey}': \${error.message}\`, { stack: error.stack, clause });
+      logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_heartbeat clause for key '${redisKey}': ${error.message}`, { stack: error.stack, clause });
       return false; // Error during processing means condition not met
     }
   } else {
