@@ -408,6 +408,58 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
       logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_trend clause for ${listKey}: ${error.message}`, { stack: error.stack, clause });
       return false;
     }
+  } else if (clause.source_type === 'sensor_heartbeat') {
+    if (!clause.source_id || !clause.max_inactivity || !clause.operator || clause.value === undefined) {
+      logger.warn(`RulesEngine: Rule ${ruleId}, sensor_heartbeat clause missing required fields (source_id, max_inactivity, operator, value). Clause:\`, clause);
+      return false;
+    }
+
+    const redisKey = \`sensor_latest:\${clause.source_id}\`;
+    let isInactiveDueToTimeout = false;
+
+    try {
+      const maxInactivityMs = parseDurationToMs(clause.max_inactivity);
+      if (maxInactivityMs === null || maxInactivityMs <= 0) {
+        logger.warn(\`RulesEngine: Rule ${ruleId}, invalid max_inactivity format or value '\${clause.max_inactivity}'. Clause:\`, clause);
+        return false;
+      }
+
+      const lastUpdatedStr = await redisClient.hget(redisKey, 'last_updated');
+
+      if (!lastUpdatedStr) {
+        isInactiveDueToTimeout = true; // Sensor never reported or 'last_updated' field missing
+        logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': No 'last_updated' field found in Redis for key '\${redisKey}'. Considered inactive.\`);
+      } else {
+        const lastUpdatedEpochMs = new Date(lastUpdatedStr).getTime();
+        if (isNaN(lastUpdatedEpochMs)) {
+          isInactiveDueToTimeout = true; // Invalid date string, treat as if never updated for safety
+          logger.warn(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': Invalid date string for 'last_updated' in Redis: '\${lastUpdatedStr}'. Key '\${redisKey}'. Considered inactive.\`);
+        } else {
+          const elapsedTimeMs = Date.now() - lastUpdatedEpochMs;
+          isInactiveDueToTimeout = (elapsedTimeMs > maxInactivityMs);
+          logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat for '\${clause.source_id}': Last update was \${(elapsedTimeMs / 1000).toFixed(1)}s ago. Max inactivity allowed is \${(maxInactivityMs / 1000).toFixed(1)}s. IsInactiveDueToTimeout: \${isInactiveDueToTimeout}\`);
+        }
+      }
+
+      // Final comparison: clause.value typically 'true' if rule is "alert IF inactive"
+      // or 'false' if rule is "proceed IF active (NOT inactive)"
+      const expectedRuleOutcomeForInactivity = String(clause.value).toLowerCase() === 'true';
+      let finalClauseOutcome = false;
+
+      if (clause.operator === 'is' || clause.operator === '==' || clause.operator === '===') {
+        finalClauseOutcome = (isInactiveDueToTimeout === expectedRuleOutcomeForInactivity);
+      } else if (clause.operator === 'isnot' || clause.operator === '!=' || clause.operator === '!==') {
+        finalClauseOutcome = (isInactiveDueToTimeout !== expectedRuleOutcomeForInactivity);
+      } else {
+        logger.warn(\`RulesEngine: Rule ${ruleId}, unsupported operator '\${clause.operator}' for sensor_heartbeat. Defaulting to false.\`);
+      }
+      logger.debug(\`RulesEngine: Rule ${ruleId}, sensor_heartbeat ('\${clause.source_id}' inactive for >\${clause.max_inactivity} is \${isInactiveDueToTimeout}) \${clause.operator} \${expectedRuleOutcomeForInactivity}. Final clause outcome: \${finalClauseOutcome}\`);
+      return finalClauseOutcome;
+
+    } catch (error) {
+      logger.error(\`RulesEngine: Rule ${ruleId}, error processing sensor_heartbeat clause for key '\${redisKey}': \${error.message}\`, { stack: error.stack, clause });
+      return false; // Error during processing means condition not met
+    }
   } else {
     logger.warn(`RulesEngine: Unknown or unsupported clause source_type '${clause.source_type}' or missing fields in rule ${ruleId}:`, clause);
     return false;
