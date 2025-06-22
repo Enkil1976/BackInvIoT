@@ -601,7 +601,8 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
     } catch (error) {
       logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_heartbeat clause for key '${redisKey}': ${error.message}`, { stack: error.stack, clause });
       return false; // Error during processing means condition not met
-    } else {
+    }
+
     logger.warn(`RulesEngine: Unknown or unsupported clause source_type '${clause.source_type}' or missing fields in rule ${ruleId}:`, clause);
     return false;
   }
