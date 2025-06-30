@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { registerUser } = require('../services/authService');
+const { registerUser, loginUser } = require('../services/authService');
+const { protect } = require('../middleware/auth');
 const logger = require('../config/logger');
 
 // Registro de usuario
@@ -31,7 +32,7 @@ router.post('/login', async (req, res, next) => {
     if (!username || !password) {
       return res.status(400).json({ error: 'username y password son obligatorios.' });
     }
-    const result = await require('../services/authService').loginUser({ username, password });
+    const result = await loginUser({ username, password });
     res.status(200).json(result);
   } catch (err) {
     logger.error('Error en /api/auth/login:', err);
@@ -40,6 +41,16 @@ router.post('/login', async (req, res, next) => {
     } else {
       res.status(500).json({ error: 'Error interno del servidor.' });
     }
+  }
+});
+
+// Verify token endpoint
+router.get('/verify', protect, async (req, res) => {
+  try {
+    res.status(200).json({ message: 'Token is valid', user: req.user });
+  } catch (err) {
+    logger.error('Error in /api/auth/verify:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

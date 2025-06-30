@@ -6,7 +6,7 @@ const calcDewPoint = require('../utils/dewPoint');
 const validateTableParam = require('../middleware/validate');
 const cacheMiddleware = require('../middleware/cache')(redisClient);
 
-const authMiddleware = require('../middleware/auth');
+const { protect: authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 
 // /api/chart/:table
@@ -193,9 +193,8 @@ router.get('/stats/:table',
 
 // /api/latest/:table
 router.get('/latest/:table',
-  authMiddleware,
   validateTableParam,
-  cacheMiddleware('latest-record'),
+  cacheMiddleware('latest-record', 30),
   async (req, res, next) => {
     const { table } = req.params;
 
