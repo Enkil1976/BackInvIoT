@@ -97,8 +97,14 @@ const connectMqtt = () => {
   });
 
   client.on('message', (topic, message) => {
-    logger.info(`MQTT Client: --- 'message' event fired --- Topic: ${topic}`);
-    // Note: Raw payload is logged at the start of handleIncomingMessage itself.
+    const timestamp = new Date().toISOString();
+    const payloadPreview = message.toString().substring(0, 100);
+    logger.info(`🔔 MQTT MESSAGE RECEIVED [${timestamp}]`);
+    logger.info(`   📡 Topic: ${topic}`);
+    logger.info(`   📦 Payload size: ${message.length} bytes`);
+    logger.info(`   📄 Payload preview: ${payloadPreview}${message.length > 100 ? '...' : ''}`);
+    logger.info(`   🔄 Starting message processing...`);
+    
     handleIncomingMessage(topic, message);
   });
 };
@@ -124,11 +130,17 @@ const subscribeToTopics = () => {
 };
 
 const handleIncomingMessage = async (topic, message) => {
+  const processingStartTime = Date.now();
   const rawPayload = message.toString();
-  logger.info(`MQTT Message Received - Topic: ${topic}, Raw Payload: ${rawPayload}`);
+  const receivedAt = new Date();
+  
+  logger.info(`🚀 MESSAGE PROCESSING STARTED`);
+  logger.info(`   🕰️ Timestamp: ${receivedAt.toISOString()}`);
+  logger.info(`   📡 Topic: ${topic}`);
+  logger.info(`   📄 Full payload: ${rawPayload}`);
+  logger.info(`   🔍 Parsing topic structure...`);
 
   const topicParts = topic.split('/');
-  const receivedAt = new Date();
   let query;
   let values;
   let tableName;
@@ -138,23 +150,41 @@ const handleIncomingMessage = async (topic, message) => {
   if (topicParts.length === 3 && topicParts[0] === 'Invernadero') {
     idOrGroup = topicParts[1];
     const dataType = topicParts[2];
+    logger.info(`🎯 TOPIC STRUCTURE VALID`);
+    logger.info(`   🔖 Group/Sensor: ${idOrGroup}`);
+    logger.info(`   📊 Data Type: ${dataType}`);
+    logger.info(`   ✅ Topic format: Invernadero/${idOrGroup}/${dataType}`);
     logger.debug(`MQTT Handler: Identified idOrGroup='${idOrGroup}', dataType='${dataType}'`);
 
     if ((idOrGroup === 'TemHum1' || idOrGroup === 'TemHum2') && dataType === 'data') {
       tableName = idOrGroup.toLowerCase();
-      logger.debug(`MQTT Handler: Processing TemHum data for table '${tableName}'`);
+      logger.info(`🌡️ PROCESSING TEMHUM DATA`);
+      logger.info(`   📦 Target table: ${tableName}`);
+      logger.info(`   🔄 Parsing JSON payload...`);
+      
       try {
         data = JSON.parse(rawPayload);
+        logger.info(`   ✅ JSON parsing successful`);
+        logger.info(`   📄 Parsed data: ${JSON.stringify(data, null, 2)}`);
         logger.debug(`MQTT Handler: Parsed TemHum JSON data for ${tableName}: %j`, data);
       } catch (error) {
+        logger.error(`   ❌ JSON parsing failed: ${error.message}`);
         logger.error(`MQTT Handler: Failed to parse JSON for ${topic}: ${error.message}`, { rawPayload });
         return;
       }
 
+      logger.info(`   🔍 Validating required fields...`);
       if (data.temperatura === undefined || data.humedad === undefined || !data.stats) {
+        logger.error(`   ❌ VALIDATION FAILED: Missing core fields`);
+        logger.error(`   🔴 Required: temperatura, humedad, stats`);
+        logger.error(`   📄 Available fields: ${Object.keys(data).join(', ')}`);
         logger.warn(`MQTT Handler: Missing core fields in TemHum data for ${tableName}. Data: %j`, data);
         return;
       }
+      logger.info(`   ✅ All required fields present`);
+      logger.info(`   🌡️ Temperature: ${data.temperatura}°C`);
+      logger.info(`   💧 Humidity: ${data.humedad}%`);
+      logger.info(`   📈 Stats: ${JSON.stringify(data.stats)}`);
 
       query = `
         INSERT INTO ${tableName} (temperatura, humedad, heatindex, dewpoint, rssi, boot, mem, stats_tmin, stats_tmax, stats_tavg, stats_hmin, stats_hmax, stats_havg, stats_total, stats_errors, received_at)
@@ -173,7 +203,7 @@ const handleIncomingMessage = async (topic, message) => {
             heatindex: data.heatindex, dewpoint: data.dewpoint,
             rssi: data.rssi, last_updated: receivedAt.toISOString()
         };
-        await redisClient.hmset(sensorKeyLatestTemHum, latestValuesForEvent);
+        await redisClient.hset(sensorKeyLatestTemHum, latestValuesForEvent);
         logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyLatestTemHum}`);
 
         mqttEvents.emit('sensor_latest_update', {
@@ -227,7 +257,7 @@ const handleIncomingMessage = async (topic, message) => {
           if (data.temp !== undefined) { // Check for data.temp
             redisPayload['temperatura_agua'] = data.temp; // Store as 'temperatura_agua'
           }
-          await redisClient.hmset(sensorKeyAguaData, redisPayload);
+          await redisClient.hset(sensorKeyAguaData, redisPayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaData} (multi-param)`);
 
           mqttEvents.emit('sensor_latest_update', {
@@ -281,7 +311,7 @@ const handleIncomingMessage = async (topic, message) => {
             'temperatura_agua': waterTemp,
             'last_updated_temp_agua': receivedAt.toISOString()
           };
-          await redisClient.hmset(sensorKeyAguaTemp, redisUpdatePayload);
+          await redisClient.hset(sensorKeyAguaTemp, redisUpdatePayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaTemp} (temp_agua)`);
 
           mqttEvents.emit('sensor_latest_update', {
@@ -346,7 +376,7 @@ const handleIncomingMessage = async (topic, message) => {
               'last_updated': receivedAt.toISOString()
             };
             if (data.sensor_timestamp) { redisPayload['sensor_timestamp'] = data.sensor_timestamp; }
-            await redisClient.hmset(sensorKeyPower, redisPayload);
+            await redisClient.hset(sensorKeyPower, redisPayload);
             logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyPower}`);
 
             mqttEvents.emit('sensor_latest_update', {

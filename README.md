@@ -47,7 +47,8 @@ Respuesta exitosa:
     "id": 1,
     "username": "usuario1",
     "email": "correo@ejemplo.com",
-    "created_at": "2025-06-13T21:00:00.000Z"
+    "created_at": "2025-06-13T21:00:00.000Z",
+    "role": "viewer"
   }
 }
 ```
