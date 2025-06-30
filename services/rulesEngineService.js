@@ -458,7 +458,6 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
     const listKey = `sensor_history:${clause.source_id}:${clause.metric}`;
     let trendDetected = false;
     let dataPoints = []; // Array of {ts, val} objects
-
     try {
       // Fetch enough data, SENSOR_HISTORY_MAX_LENGTH is a general cap for list size
       const rawSamples = await redisClient.lrange(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1);
@@ -603,7 +602,7 @@ async function evaluateClause(ruleId, clause, contextDataForRule) {
       logger.error(`RulesEngine: Rule ${ruleId}, error processing sensor_heartbeat clause for key '${redisKey}': ${error.message}`, { stack: error.stack, clause });
       return false; // Error during processing means condition not met
     }
-  } else {
+
     logger.warn(`RulesEngine: Unknown or unsupported clause source_type '${clause.source_type}' or missing fields in rule ${ruleId}:`, clause);
     return false;
   }
