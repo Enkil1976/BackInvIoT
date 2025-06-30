@@ -6,6 +6,16 @@ const SALT_ROUNDS = 12;
 
 async function registerUser({ username, email, password }) {
   try {
+    // Validar formato de email si se proporciona
+    if (email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        const error = new Error('Formato de email inválido.');
+        error.status = 400;
+        throw error;
+      }
+    }
+
     // Verificar si el usuario ya existe
     const userExists = await pool.query(
       'SELECT id FROM users WHERE username = $1',
@@ -39,7 +49,10 @@ async function registerUser({ username, email, password }) {
 const jwt = require('jsonwebtoken');
 const redis = require('../config/redis');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecret';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'supersecret') {
+  throw new Error('JWT_SECRET must be set to a secure value in environment variables');
+}
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 
 async function loginUser({ username, password }) {

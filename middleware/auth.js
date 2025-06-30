@@ -1,7 +1,10 @@
 const jwt = require('jsonwebtoken');
 const logger = require('../config/logger'); // Assuming logger is in ../config/logger
 
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecret'; // Should match authService.js
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'supersecret') {
+  throw new Error('JWT_SECRET must be set to a secure value in environment variables');
+}
 
 // Middleware to verify JWT and attach user to request
 const protect = (req, res, next) => {
