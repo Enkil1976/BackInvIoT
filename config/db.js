@@ -1,4 +1,6 @@
 require('dotenv').config();
+// Configurar zona horaria de Chile
+require('./timezone');
 const { Pool } = require('pg');
 const logger = require('./logger');
 
@@ -7,7 +9,10 @@ const pool = new Pool({
   max: 15,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  // Configurar zona horaria de Chile en PostgreSQL
+  application_name: 'invernadero-iot-chile',
+  options: '--TimeZone=America/Santiago'
 });
 
 pool.query('SELECT 1')

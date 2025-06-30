@@ -1,4 +1,6 @@
 require('dotenv').config();
+// Configurar zona horaria de Chile ANTES de cualquier otra importación
+require('./config/timezone');
 const express = require('express');
 const cors = require('cors');
 const logger = require('./config/logger');
@@ -8,6 +10,7 @@ const healthRoutes = require('./routes/health');
 const dataRoutes = require('./routes/data');
 const authRoutes = require('./routes/auth');
 const errorHandler = require('./middleware/errorHandler');
+const { toChileLogString } = require('./config/timezone');
 
 const app = express();
 
@@ -42,7 +45,7 @@ app.use(cors(corsOptions));
 
 // Log all incoming requests
 app.use((req, res, next) => {
-  logger.info(`[${new Date().toISOString()}] ${req.method} ${req.path} from ${req.get('Origin') || 'no-origin'}`);
+  logger.info(`[${toChileLogString()}] ${req.method} ${req.path} from ${req.get('Origin') || 'no-origin'}`);
   next();
 });
 app.use(express.json());
