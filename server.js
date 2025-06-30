@@ -8,6 +8,7 @@ const healthRoutes = require('./routes/health');
 const dataRoutes = require('./routes/data');
 const authRoutes = require('./routes/auth');
 const errorHandler = require('./middleware/errorHandler');
+const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 
 const app = express();
 
@@ -59,10 +60,28 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 4000;
 const server = app.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT}`);
+  
+  // Inicializar servicio MQTT
+  logger.info('🔌 Initializing MQTT service...');
+  connectMqtt();
 });
 
 process.on('SIGTERM', () => {
   server.close(() => {
+    // Desconectar MQTT primero
+    disconnectMqtt();
+    pool.end();
+    redisClient.disconnect();
+    logger.info('Server terminated');
+    process.exit(0);
+  });
+});
+
+// Manejo adicional de señales para shutdown limpio
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down gracefully...');
+  server.close(() => {
+    disconnectMqtt();
     pool.end();
     redisClient.disconnect();
     logger.info('Server terminated');
