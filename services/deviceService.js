@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const logger = require('../config/logger');
+const { getChileDate } = require('../config/timezone');
 
 let _broadcastWebSocket = null;
 let _sendToRole = null;

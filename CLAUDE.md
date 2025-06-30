@@ -23,6 +23,7 @@ npm run test:notification   # Test notification system
 ```bash
 npm run diagnose:mqtt       # Diagnose MQTT system issues
 npm run simulate:mqtt       # Generate test MQTT data
+npm run verify:timezone     # Verify Chile timezone configuration
 ```
 
 ### Database Setup
@@ -37,6 +38,7 @@ psql invernadero_iot < sql/create_power_monitor_logs_table.sql
 psql invernadero_iot < sql/create_rules_table.sql
 psql invernadero_iot < sql/create_scheduled_operations_table.sql
 psql invernadero_iot < sql/create_notifications_tables.sql
+psql invernadero_iot < sql/configure_chile_timezone.sql
 ```
 
 ## High-Level Architecture
@@ -113,6 +115,28 @@ Located in `services/rulesEngine/`:
 - **Context Cache** (`utils/contextCache.js`) optimizes data fetching
 - **Data Fetcher** (`utils/dataFetcher.js`) retrieves sensor/device state
 - Rules triggered by scheduled evaluation and real-time sensor updates
+
+## Chile Timezone Configuration
+
+The entire system is configured to use Chile timezone (`America/Santiago`):
+- Automatically handles daylight saving time (CLT UTC-4 winter / CLST UTC-3 summer)
+- All timestamps in logs, database, and API responses use Chile time
+- MQTT message processing timestamps use Chile timezone
+- PostgreSQL configured with Santiago timezone
+
+### Timezone Utilities
+```javascript
+const { getChileDate, toChileISOString, toChileLogString } = require('./config/timezone');
+
+// Get current Chile date
+const now = getChileDate();
+
+// Format for ISO string in Chile timezone
+const isoString = toChileISOString();
+
+// Format for human-readable logs
+const logString = toChileLogString();
+```
 
 ## Environment Configuration
 

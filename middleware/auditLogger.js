@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const logger = require('../config/logger');
+const { toChileISOString } = require('../config/timezone');
 
 /**
  * Registra un evento de auditoría en la base de datos
@@ -21,7 +22,7 @@ const auditLogin = async (req, action, success = true, details = {}, userId = nu
       ...details,
       endpoint: req.originalUrl,
       method: req.method,
-      timestamp: new Date().toISOString()
+      timestamp: toChileISOString()
     };
 
     // Insertar en la base de datos
@@ -109,7 +110,7 @@ const auditFailedLogin = async (req, username, reason) => {
   await auditLogin(req, 'failed_login', false, { 
     username, 
     reason,
-    attemptedAt: new Date().toISOString()
+    attemptedAt: toChileISOString()
   });
 };
 
@@ -119,7 +120,7 @@ const auditFailedLogin = async (req, username, reason) => {
 const auditLogout = async (req) => {
   await auditLogin(req, 'logout', true, {
     username: req.user?.username,
-    logoutAt: new Date().toISOString()
+    logoutAt: toChileISOString()
   });
 };
 
@@ -129,7 +130,7 @@ const auditLogout = async (req) => {
 const auditTokenEvent = async (req, eventType, details = {}) => {
   await auditLogin(req, eventType, false, {
     ...details,
-    eventAt: new Date().toISOString()
+    eventAt: toChileISOString()
   });
 };
 

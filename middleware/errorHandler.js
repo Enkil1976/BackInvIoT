@@ -1,4 +1,5 @@
 const logger = require('../config/logger');
+const { toChileISOString } = require('../config/timezone');
 
 // Middleware global de manejo de errores
 function errorHandler(err, req, res, next) {
@@ -10,7 +11,7 @@ function errorHandler(err, req, res, next) {
   res.status(status).json({
     error: message,
     path: req.originalUrl,
-    timestamp: new Date().toISOString()
+    timestamp: toChileISOString()
   });
 }
 

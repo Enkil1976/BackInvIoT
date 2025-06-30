@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const logger = require('../config/logger');
 const redisClient = require('../config/redis'); // Import Redis client
 const EventEmitter = require('events');
+const { getChileDate, toChileISOString } = require('../config/timezone');
 
 const mqttEvents = new EventEmitter();
 const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH, 10) || 100;
@@ -97,7 +98,7 @@ const connectMqtt = () => {
   });
 
   client.on('message', (topic, message) => {
-    const timestamp = new Date().toISOString();
+    const timestamp = toChileISOString();
     const payloadPreview = message.toString().substring(0, 100);
     logger.info(`🔔 MQTT MESSAGE RECEIVED [${timestamp}]`);
     logger.info(`   📡 Topic: ${topic}`);
@@ -132,10 +133,10 @@ const subscribeToTopics = () => {
 const handleIncomingMessage = async (topic, message) => {
   const processingStartTime = Date.now();
   const rawPayload = message.toString();
-  const receivedAt = new Date();
+  const receivedAt = getChileDate();
   
   logger.info(`🚀 MESSAGE PROCESSING STARTED`);
-  logger.info(`   🕰️ Timestamp: ${receivedAt.toISOString()}`);
+  logger.info(`   🕰️ Timestamp: ${toChileISOString(receivedAt)}`);
   logger.info(`   📡 Topic: ${topic}`);
   logger.info(`   📄 Full payload: ${rawPayload}`);
   logger.info(`   🔍 Parsing topic structure...`);
@@ -201,7 +202,7 @@ const handleIncomingMessage = async (topic, message) => {
         const latestValuesForEvent = {
             temperatura: data.temperatura, humedad: data.humedad,
             heatindex: data.heatindex, dewpoint: data.dewpoint,
-            rssi: data.rssi, last_updated: receivedAt.toISOString()
+            rssi: data.rssi, last_updated: toChileISOString(receivedAt)
         };
         await redisClient.hset(sensorKeyLatestTemHum, latestValuesForEvent);
         logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyLatestTemHum}`);
@@ -215,7 +216,7 @@ const handleIncomingMessage = async (topic, message) => {
         for (const metric of metricsToCacheHistory) {
             if (data[metric] !== undefined) {
                 const listKey = `sensor_history:${tableName}:${metric}`;
-                const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data[metric] });
+                const dataPoint = JSON.stringify({ ts: toChileISOString(receivedAt), val: data[metric] });
                 logger.debug(`MQTT Handler: Attempting Redis list update for ${listKey}`);
                 try {
                     await redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec();
@@ -252,7 +253,7 @@ const handleIncomingMessage = async (topic, message) => {
         try {
           const redisPayload = {
             'ph': data.ph, 'ec': data.ec, 'ppm': data.ppm,
-            'last_updated_multiparam': receivedAt.toISOString()
+            'last_updated_multiparam': toChileISOString(receivedAt)
           };
           if (data.temp !== undefined) { // Check for data.temp
             redisPayload['temperatura_agua'] = data.temp; // Store as 'temperatura_agua'
@@ -280,7 +281,7 @@ const handleIncomingMessage = async (topic, message) => {
 
               if (valueToLog !== undefined) {
                   const listKey = `sensor_history:calidad_agua:${param}`;
-                  const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: valueToLog });
+                  const dataPoint = JSON.stringify({ ts: toChileISOString(receivedAt), val: valueToLog });
                   logger.debug(`MQTT Handler: Attempting Redis list update for ${listKey}`);
                   try {
                       await redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec();
@@ -309,7 +310,7 @@ const handleIncomingMessage = async (topic, message) => {
         try {
           const redisUpdatePayload = {
             'temperatura_agua': waterTemp,
-            'last_updated_temp_agua': receivedAt.toISOString()
+            'last_updated_temp_agua': toChileISOString(receivedAt)
           };
           await redisClient.hset(sensorKeyAguaTemp, redisUpdatePayload);
           logger.info(`MQTT Handler: ✅ Redis HMSET Success for ${sensorKeyAguaTemp} (temp_agua)`);
@@ -320,7 +321,7 @@ const handleIncomingMessage = async (topic, message) => {
           });
 
           const tempListKey = `sensor_history:calidad_agua:temperatura_agua`;
-          const tempDataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: waterTemp });
+          const tempDataPoint = JSON.stringify({ ts: toChileISOString(receivedAt), val: waterTemp });
           logger.debug(`MQTT Handler: Attempting Redis list update for ${tempListKey}`);
           try {
             await redisClient.multi().lpush(tempListKey, tempDataPoint).ltrim(tempListKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec();
@@ -373,7 +374,7 @@ const handleIncomingMessage = async (topic, message) => {
           try {
             const redisPayload = {
               'voltage': data.voltage, 'current': data.current, 'power': data.power,
-              'last_updated': receivedAt.toISOString()
+              'last_updated': toChileISOString(receivedAt)
             };
             if (data.sensor_timestamp) { redisPayload['sensor_timestamp'] = data.sensor_timestamp; }
             await redisClient.hset(sensorKeyPower, redisPayload);
@@ -388,7 +389,7 @@ const handleIncomingMessage = async (topic, message) => {
             for (const metric of metricsToLogHistory) {
                 if (data[metric] !== undefined) {
                     const listKey = `sensor_history:power:${powerSensorHardwareId}:${metric}`;
-                    const dataPoint = JSON.stringify({ ts: receivedAt.toISOString(), val: data[metric] });
+                    const dataPoint = JSON.stringify({ ts: toChileISOString(receivedAt), val: data[metric] });
                     logger.debug(`MQTT Handler: Attempting Redis list update for ${listKey}`);
                     try {
                         await redisClient.multi().lpush(listKey, dataPoint).ltrim(listKey, 0, SENSOR_HISTORY_MAX_LENGTH - 1).exec();
