@@ -25,7 +25,7 @@ const handleValidationErrors = (req, res, next) => {
  * POST /api/notifications/send
  * Send a notification immediately
  */
-router.post('/send',
+router.post('/api/notifications/send',
   authenticate,
   [
     body('subject').notEmpty().withMessage('Subject is required'),
@@ -113,7 +113,7 @@ router.post('/send',
  * POST /api/notifications/send-template
  * Send a notification using a template
  */
-router.post('/send-template',
+router.post('/api/notifications/send-template',
   authenticate,
   [
     body('templateName').notEmpty().withMessage('Template name is required'),
@@ -179,7 +179,7 @@ router.post('/send-template',
  * POST /api/notifications/schedule
  * Schedule a notification for future delivery
  */
-router.post('/schedule',
+router.post('/api/notifications/schedule',
   authenticate,
   [
     body('subject').notEmpty().withMessage('Subject is required'),
@@ -275,7 +275,7 @@ router.post('/schedule',
  * GET /api/notifications/:id
  * Get notification details by ID
  */
-router.get('/:id',
+router.get('/api/notifications/:id',
   authenticate,
   [
     param('id').isInt().withMessage('Notification ID must be an integer')
@@ -324,7 +324,7 @@ router.get('/:id',
  * GET /api/notifications
  * List notifications with pagination and filters
  */
-router.get('/',
+router.get('/api/notifications',
   authenticate,
   [
     query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
