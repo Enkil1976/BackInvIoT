@@ -79,7 +79,12 @@ async function loginUser({ username, password }) {
     }
 
     // Generar JWT
-    const payload = { id: user.id, username: user.username, role: user.role };
+    const payload = { 
+      id: user.id, 
+      sub: user.id.toString(),
+      username: user.username, 
+      role: user.role 
+    };
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 
     // Guardar token en Redis (opcional, para invalidación/control)
