@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middleware/auth');
 const logger = require('../config/logger');
 
 // POST /api/operations - Record a new operation
-router.post('/', protect, authorize(['admin', 'service_account']), async (req, res) => {
+router.post('/', protect, authorize('admin', 'service_account'), async (req, res) => {
   try {
     const { serviceName, action, status, userId, deviceId, targetEntityType, targetEntityId, details } = req.body;
 
@@ -39,7 +39,7 @@ router.post('/', protect, authorize(['admin', 'service_account']), async (req, r
 });
 
 // GET /api/operations - Get operation logs
-router.get('/', protect, authorize(['admin', 'auditor']), async (req, res) => {
+router.get('/', protect, authorize('admin', 'auditor'), async (req, res) => {
   try {
     // Convert query params for page and limit to integers if they exist
     const queryParams = { ...req.query };

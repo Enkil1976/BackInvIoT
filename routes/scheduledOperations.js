@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middleware/auth');
 const logger = require('../config/logger');
 
 // POST /api/scheduled-operations - Create a new scheduled operation
-router.post('/', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.post('/', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const { device_id, action_name, cron_expression, execute_at } = req.body;
     // Basic validation: device_id, action_name, and one of cron_expression or execute_at must exist
@@ -28,7 +28,7 @@ router.post('/', protect, authorize(['admin', 'editor']), async (req, res) => {
 });
 
 // GET /api/scheduled-operations - Get all scheduled operations
-router.get('/', protect, authorize(['admin', 'editor', 'viewer']), async (req, res) => {
+router.get('/', protect, authorize('admin', 'editor', 'viewer'), async (req, res) => {
   try {
     // Convert query params for page and limit to integers if they exist, ensure they are positive
     const queryParams = { ...req.query };
@@ -67,7 +67,7 @@ router.get('/', protect, authorize(['admin', 'editor', 'viewer']), async (req, r
 });
 
 // GET /api/scheduled-operations/:id - Get a single scheduled operation by ID
-router.get('/:id', protect, authorize(['admin', 'editor', 'viewer']), async (req, res) => {
+router.get('/:id', protect, authorize('admin', 'editor', 'viewer'), async (req, res) => {
   try {
     const scheduleId = req.params.id;
     const schedule = await scheduleService.getScheduledOperationById(scheduleId);
@@ -82,7 +82,7 @@ router.get('/:id', protect, authorize(['admin', 'editor', 'viewer']), async (req
 });
 
 // PUT /api/scheduled-operations/:id - Update a scheduled operation
-router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.put('/:id', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const scheduleId = req.params.id;
     if (Object.keys(req.body).length === 0) {
@@ -101,7 +101,7 @@ router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => 
 });
 
 // DELETE /api/scheduled-operations/:id - Delete a scheduled operation
-router.delete('/:id', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.delete('/:id', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const scheduleId = req.params.id;
     const result = await scheduleService.deleteScheduledOperation(scheduleId);

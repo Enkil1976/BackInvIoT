@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middleware/auth');
 const logger = require('../config/logger');
 
 // POST /api/devices - Create a new device
-router.post('/', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.post('/', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const { name, device_id, type, description, status, config, room_id } = req.body;
     // Basic validation
@@ -42,7 +42,7 @@ router.get('/:id/consumption-history', protect, async (req, res) => {
 });
 
 // PATCH /api/devices/:id/status - Update device status
-router.patch('/:id/status', protect, authorize(['admin', 'editor', 'operator']), async (req, res) => {
+router.patch('/:id/status', protect, authorize('admin', 'editor', 'operator'), async (req, res) => {
   try {
     const deviceId = req.params.id;
     const { status } = req.body;
@@ -97,7 +97,7 @@ router.get('/:id', protect, async (req, res) => {
 });
 
 // PUT /api/devices/:id - Update a device
-router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.put('/:id', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const deviceId = req.params.id;
     // Basic validation: ensure body is not empty if something is expected
@@ -117,7 +117,7 @@ router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => 
 });
 
 // DELETE /api/devices/:id - Delete a device
-router.delete('/:id', protect, authorize(['admin']), async (req, res) => {
+router.delete('/:id', protect, authorize('admin'), async (req, res) => {
   try {
     const deviceId = req.params.id;
     const result = await deviceService.deleteDevice(deviceId);
