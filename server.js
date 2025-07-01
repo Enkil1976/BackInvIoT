@@ -9,6 +9,7 @@ const redisClient = require('./config/redis');
 const healthRoutes = require('./routes/health');
 const dataRoutes = require('./routes/data');
 const authRoutes = require('./routes/auth');
+const deviceRoutes = require('./routes/devices');
 const errorHandler = require('./middleware/errorHandler');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 const { toChileLogString } = require('./config/timezone');
@@ -55,6 +56,7 @@ app.use(express.json());
 app.use('/api', healthRoutes);
 app.use('/api', dataRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/devices', deviceRoutes);
 
 // Error handler
 app.use(errorHandler);
