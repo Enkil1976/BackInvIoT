@@ -12,3 +12,6 @@ npm-debug.log*
 # Build output
 dist/
 
+create_admin_user.js
+
+.gitignore
