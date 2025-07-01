@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middleware/auth');
 const logger = require('../config/logger');
 
 // POST /api/rules - Create a new rule
-router.post('/', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.post('/', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const { name, conditions, actions } = req.body;
     if (!name || !conditions || !actions) {
@@ -27,7 +27,7 @@ router.post('/', protect, authorize(['admin', 'editor']), async (req, res) => {
 });
 
 // GET /api/rules - Get all rules
-router.get('/', protect, authorize(['admin', 'editor', 'viewer']), async (req, res) => {
+router.get('/', protect, authorize('admin', 'editor', 'viewer'), async (req, res) => {
   try {
     const queryParams = { ...req.query };
     if (queryParams.page) queryParams.page = parseInt(queryParams.page, 10);
@@ -56,7 +56,7 @@ router.get('/', protect, authorize(['admin', 'editor', 'viewer']), async (req, r
 });
 
 // GET /api/rules/:id - Get a single rule by ID
-router.get('/:id', protect, authorize(['admin', 'editor', 'viewer']), async (req, res) => {
+router.get('/:id', protect, authorize('admin', 'editor', 'viewer'), async (req, res) => {
   try {
     const rule = await rulesService.getRuleById(req.params.id);
     res.status(200).json(rule);
@@ -70,7 +70,7 @@ router.get('/:id', protect, authorize(['admin', 'editor', 'viewer']), async (req
 });
 
 // PUT /api/rules/:id - Update a rule
-router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.put('/:id', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     if (Object.keys(req.body).length === 0) {
       return res.status(400).json({ error: 'Request body cannot be empty for update.' });
@@ -87,7 +87,7 @@ router.put('/:id', protect, authorize(['admin', 'editor']), async (req, res) => 
 });
 
 // DELETE /api/rules/:id - Delete a rule
-router.delete('/:id', protect, authorize(['admin', 'editor']), async (req, res) => {
+router.delete('/:id', protect, authorize('admin', 'editor'), async (req, res) => {
   try {
     const result = await rulesService.deleteRule(req.params.id);
     res.status(200).json(result);

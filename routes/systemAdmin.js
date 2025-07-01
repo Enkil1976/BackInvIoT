@@ -66,7 +66,7 @@ const logger = require('../config/logger'); // Assuming path is correct
 router.get(
   '/dlq/critical-actions',
   protect,
-  authorize(['admin']),
+  authorize('admin'),
   async (req, res) => {
     try {
       const { start, end, count } = req.query;
@@ -129,7 +129,7 @@ router.get(
 router.post(
   '/dlq/critical-actions/message/:messageId/retry',
   protect,
-  authorize(['admin']),
+  authorize('admin'),
   async (req, res) => {
     const { messageId } = req.params;
     // Basic Redis Stream ID format check (example: 1609459200000-0)
@@ -195,7 +195,7 @@ router.post(
 router.delete(
   '/dlq/critical-actions/message/:messageId',
   protect,
-  authorize(['admin']),
+  authorize('admin'),
   async (req, res) => {
     const { messageId } = req.params;
      if (!messageId || typeof messageId !== 'string' || !/^\d+-\d+$/.test(messageId)) {
@@ -252,7 +252,7 @@ router.delete(
 router.post(
   '/dlq/critical-actions/retry-all',
   protect,
-  authorize(['admin']),
+  authorize('admin'),
   async (req, res) => {
     try {
       // Note: current queueService.retryAllDlqMessages doesn't use batchSize, but we keep param for future.
@@ -293,7 +293,7 @@ router.post(
 router.delete(
   '/dlq/critical-actions/clear-all',
   protect,
-  authorize(['admin']),
+  authorize('admin'),
   async (req, res) => {
     try {
       const result = await queueService.clearAllDlqMessages();
