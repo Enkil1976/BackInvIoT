@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: iot-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+    healthCheckPath: /api/health
+    
+  - type: pserv
+    name: iot-database
+    env: postgresql
+    plan: free
+    
+  - type: redis
+    name: iot-redis
+    plan: free
