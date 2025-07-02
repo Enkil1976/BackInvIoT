@@ -10,7 +10,7 @@ class WeatherService {
   constructor() {
     this.apiKey = process.env.WEATHER_API_KEY;
     this.baseUrl = 'http://api.weatherapi.com/v1';
-    this.location = process.env.WEATHER_LOCATION || 'Santiago,Chile'; // Default location
+    this.location = process.env.WEATHER_LOCATION || 'las chilcas,Villarrica,Chile'; // Default location
     
     if (!this.apiKey) {
       console.warn('[WeatherService] WEATHER_API_KEY no configurada. Servicio deshabilitado.');

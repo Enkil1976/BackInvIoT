@@ -6,12 +6,48 @@ const operationService = require('./operationService');
 const { publishCriticalAction } = require('./queueService');
 const { sendNotification } = require('./notificationService');
 
+// Priority-based cooldown periods (in minutes)
+const PRIORITY_COOLDOWNS = {
+  1: 60,   // 1 hour
+  2: 30,   // 30 minutes
+  3: 15,   // 15 minutes
+  4: 10,   // 10 minutes
+  5: 5     // 5 minutes
+};
+
 // Define SENSOR_HISTORY_MAX_LENGTH, mirroring the value in mqttService.js
 // TODO: Consider moving this to a shared config or environment variable
 const SENSOR_HISTORY_MAX_LENGTH = parseInt(process.env.SENSOR_HISTORY_MAX_LENGTH, 10) || 100;
 
 let rulesEngineJob;
 let _broadcastWebSocket = null; // For dependency injection
+
+// Check if enough time has passed based on rule priority
+function canTriggerRule(rule) {
+  if (!rule.last_triggered_at) {
+    logger.info(`RulesEngine: Rule ${rule.id} ('${rule.name}') never triggered before - CAN TRIGGER`);
+    return true; // Never triggered before, can trigger now
+  }
+
+  const priority = Math.max(1, Math.min(5, rule.priority || 3)); // Clamp priority between 1-5, default to 3
+  const cooldownMinutes = PRIORITY_COOLDOWNS[priority];
+  const cooldownMs = cooldownMinutes * 60 * 1000;
+  
+  const lastTriggeredTime = new Date(rule.last_triggered_at).getTime();
+  const now = Date.now();
+  const timeSinceLastTrigger = now - lastTriggeredTime;
+  
+  const canTrigger = timeSinceLastTrigger >= cooldownMs;
+  const minutesSince = Math.round(timeSinceLastTrigger / 60000);
+  
+  if (canTrigger) {
+    logger.info(`RulesEngine: Rule ${rule.id} ('${rule.name}') priority ${priority} - READY TO TRIGGER (${minutesSince}m since last, cooldown ${cooldownMinutes}m)`);
+  } else {
+    logger.info(`RulesEngine: Rule ${rule.id} ('${rule.name}') priority ${priority} - IN COOLDOWN (${minutesSince}m since last, need ${cooldownMinutes}m)`);
+  }
+  
+  return canTrigger;
+}
 
 // Helper function to parse duration strings (e.g., "5m", "1h") into milliseconds
 function parseDurationToMs(durationStr) {
@@ -653,6 +689,15 @@ async function evaluateRules() {
 
   for (const rule of enabledRules) {
     logger.info(`RulesEngine: Evaluating rule ID ${rule.id} ('${rule.name}'), Priority: ${rule.priority}.`);
+    
+    // Check if enough time has passed based on rule priority
+    if (!canTriggerRule(rule)) {
+      const priority = Math.max(1, Math.min(5, rule.priority || 3));
+      const cooldownMinutes = PRIORITY_COOLDOWNS[priority];
+      logger.info(`RulesEngine: Rule ${rule.id} ('${rule.name}') is in cooldown period. Priority ${priority} requires ${cooldownMinutes}m between notifications. Skipping evaluation.`);
+      continue;
+    }
+    
     contextData[rule.id] = {};
 
     const gatherDataForClause = async (clause) => {
