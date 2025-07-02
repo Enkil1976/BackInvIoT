@@ -10,8 +10,10 @@ const healthRoutes = require('./routes/health');
 const dataRoutes = require('./routes/data');
 const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
+const weatherRoutes = require('./routes/weather');
 const errorHandler = require('./middleware/errorHandler');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
+const weatherScheduler = require('./services/weatherScheduler');
 const { toChileLogString } = require('./config/timezone');
 
 const app = express();
@@ -19,7 +21,7 @@ const app = express();
 // CORS config
 const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim())
-  : ['http://localhost:3000', 'http://localhost:3001'];
+  : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173', 'http://localhost:5174'];
 
 logger.info(`Allowed CORS origins: ${JSON.stringify(allowedOrigins)}`);
 
@@ -57,6 +59,7 @@ app.use('/api', healthRoutes);
 app.use('/api', dataRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', deviceRoutes);
+app.use('/api/weather', weatherRoutes);
 
 // Error handler
 app.use(errorHandler);
@@ -69,12 +72,22 @@ const server = app.listen(PORT, () => {
   // Inicializar servicio MQTT
   logger.info('🔌 Initializing MQTT service...');
   connectMqtt();
+  
+  // Inicializar scheduler de clima
+  logger.info('🌤️ Initializing Weather Scheduler...');
+  try {
+    weatherScheduler.start();
+    logger.info('✅ Weather Scheduler initialized successfully');
+  } catch (error) {
+    logger.error('❌ Weather Scheduler initialization failed:', error);
+  }
 });
 
 process.on('SIGTERM', () => {
   server.close(() => {
-    // Desconectar MQTT primero
+    // Desconectar servicios
     disconnectMqtt();
+    weatherScheduler.stop();
     pool.end();
     redisClient.disconnect();
     logger.info('Server terminated');
@@ -87,6 +100,7 @@ process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully...');
   server.close(() => {
     disconnectMqtt();
+    weatherScheduler.stop();
     pool.end();
     redisClient.disconnect();
     logger.info('Server terminated');
