@@ -1,649 +1,343 @@
 const express = require('express');
-const { protect: authenticate, authorize: requireRole } = require('../middleware/auth');
+const router = express.Router();
+const pool = require('../config/db');
+const { protect: auth } = require('../middleware/auth');
 const logger = require('../config/logger');
-const { body, param, query, validationResult } = require('express-validator');
+const notificationService = require('../services/notificationService');
 
-module.exports = function(notificationService) {
-  const router = express.Router();
+// Middleware para logs de todas las rutas
+router.use((req, res, next) => {
+  logger.info(`[NotificationRoutes] ${req.method} ${req.originalUrl}`);
+  next();
+});
 
 /**
- * Middleware to handle validation errors
+ * GET /api/notifications/rules
+ * Obtener todas las reglas de notificación
  */
-const handleValidationErrors = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
+router.get('/rules', auth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, name, description, is_enabled, conditions, actions, priority, 
+             last_triggered_at, created_at, updated_at
+      FROM rules 
+      ORDER BY priority ASC, name ASC
+    `);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error fetching rules:', error);
+    res.status(500).json({
       success: false,
-      message: 'Validation errors',
-      errors: errors.array()
+      error: 'Error al obtener reglas de notificación'
     });
   }
-  next();
-};
+});
 
 /**
- * POST /api/notifications/send
- * Send a notification immediately
+ * POST /api/notifications/rules
+ * Crear nueva regla de notificación
  */
-router.post('/api/notifications/send',
-  authenticate,
-  [
-    body('subject').notEmpty().withMessage('Subject is required'),
-    body('body').notEmpty().withMessage('Body is required'),
-    body('recipient_type').notEmpty().withMessage('Recipient type is required'),
-    body('recipient_target').notEmpty().withMessage('Recipient target is required'),
-    body('channel').optional().isIn(['email', 'telegram', 'whatsapp', 'websocket', 'system_log']).withMessage('Invalid channel'),
-    body('priority').optional().isInt({ min: 1, max: 5 }).withMessage('Priority must be between 1 and 5'),
-    body('immediate').optional().isBoolean().withMessage('Immediate must be boolean')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const {
-        subject,
-        body,
-        recipient_type,
-        recipient_target,
-        channel = 'system_log',
-        type = 'info',
-        priority = 5,
-        originDetails = {},
-        immediate = false
-      } = req.body;
+router.post('/rules', auth, async (req, res) => {
+  try {
+    const { name, description, is_enabled, conditions, actions, priority } = req.body;
 
-      // Add user context to origin details
-      const enrichedOriginDetails = {
-        ...originDetails,
-        requestedBy: {
-          userId: req.user.id,
-          username: req.user.username,
-          role: req.user.role
-        },
-        service: 'NotificationAPI'
-      };
-
-      const result = await notificationService.sendNotification({
-        subject,
-        body,
-        recipient_type,
-        recipient_target,
-        channel,
-        type,
-        priority,
-        originDetails: enrichedOriginDetails,
-        immediate
-      });
-
-      if (result.success) {
-        logger.info(`Notification sent via API by user ${req.user.username}:`, {
-          notificationId: result.notificationId,
-          channel,
-          immediate
-        });
-
-        res.json({
-          success: true,
-          message: immediate ? 'Notification sent immediately' : 'Notification queued for processing',
-          data: {
-            notificationId: result.notificationId,
-            messageId: result.messageId,
-            immediate,
-            queued: result.queued
-          }
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          message: result.message || 'Failed to send notification'
-        });
-      }
-
-    } catch (error) {
-      logger.error('Error in send notification API:', error);
-      res.status(500).json({
+    // Validaciones básicas
+    if (!name || !conditions || !actions) {
+      return res.status(400).json({
         success: false,
-        message: 'Internal server error',
-        error: error.message
+        error: 'Nombre, condiciones y acciones son requeridos'
       });
     }
+
+    const result = await pool.query(`
+      INSERT INTO rules (name, description, is_enabled, conditions, actions, priority)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, name, description, is_enabled, conditions, actions, priority, created_at
+    `, [
+      name,
+      description || '',
+      is_enabled !== undefined ? is_enabled : true,
+      JSON.stringify(conditions),
+      JSON.stringify(actions),
+      priority || 5
+    ]);
+
+    logger.info(`[NotificationRoutes] Rule created: ${name} (ID: ${result.rows[0].id})`);
+
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message: 'Regla creada exitosamente'
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error creating rule:', error);
+    
+    if (error.code === '23505') { // Unique constraint violation
+      return res.status(409).json({
+        success: false,
+        error: 'Ya existe una regla con ese nombre'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Error al crear regla de notificación'
+    });
   }
-);
+});
 
 /**
- * POST /api/notifications/send-template
- * Send a notification using a template
+ * PUT /api/notifications/rules/:id
+ * Actualizar regla de notificación
  */
-router.post('/api/notifications/send-template',
-  authenticate,
-  [
-    body('templateName').notEmpty().withMessage('Template name is required'),
-    body('variables').isObject().withMessage('Variables must be an object'),
-    body('recipient_type').notEmpty().withMessage('Recipient type is required'),
-    body('recipient_target').notEmpty().withMessage('Recipient target is required')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const { templateName, variables, recipient_type, recipient_target, originDetails = {} } = req.body;
+router.put('/rules/:id', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, is_enabled, conditions, actions, priority } = req.body;
 
-      const enrichedOriginDetails = {
-        ...originDetails,
-        requestedBy: {
-          userId: req.user.id,
-          username: req.user.username,
-          role: req.user.role
-        },
-        service: 'NotificationAPI'
-      };
+    const result = await pool.query(`
+      UPDATE rules 
+      SET name = $1, description = $2, is_enabled = $3, conditions = $4, 
+          actions = $5, priority = $6, updated_at = NOW()
+      WHERE id = $7
+      RETURNING id, name, description, is_enabled, conditions, actions, priority, updated_at
+    `, [
+      name,
+      description,
+      is_enabled,
+      JSON.stringify(conditions),
+      JSON.stringify(actions),
+      priority,
+      id
+    ]);
 
-      const result = await notificationService.sendNotificationWithTemplate(
-        templateName,
-        variables,
-        {
-          recipient_type,
-          recipient_target,
-          originDetails: enrichedOriginDetails
-        }
-      );
-
-      if (result.success) {
-        logger.info(`Template notification sent via API by user ${req.user.username}:`, {
-          templateName,
-          channels: result.results.map(r => r.channel)
-        });
-
-        res.json({
-          success: true,
-          message: 'Template notification sent',
-          data: result
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          message: result.error || 'Failed to send template notification'
-        });
-      }
-
-    } catch (error) {
-      logger.error('Error in send template notification API:', error);
-      res.status(500).json({
+    if (result.rows.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'Internal server error',
-        error: error.message
+        error: 'Regla no encontrada'
       });
     }
+
+    logger.info(`[NotificationRoutes] Rule updated: ${name} (ID: ${id})`);
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: 'Regla actualizada exitosamente'
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error updating rule:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al actualizar regla de notificación'
+    });
   }
-);
+});
 
 /**
- * POST /api/notifications/schedule
- * Schedule a notification for future delivery
+ * DELETE /api/notifications/rules/:id
+ * Eliminar regla de notificación
  */
-router.post('/api/notifications/schedule',
-  authenticate,
-  [
-    body('subject').notEmpty().withMessage('Subject is required'),
-    body('body').notEmpty().withMessage('Body is required'),
-    body('recipient_type').notEmpty().withMessage('Recipient type is required'),
-    body('recipient_target').notEmpty().withMessage('Recipient target is required'),
-    body('scheduledAt').isISO8601().withMessage('Scheduled time must be a valid ISO 8601 date'),
-    body('channel').optional().isIn(['email', 'telegram', 'whatsapp', 'websocket', 'system_log']).withMessage('Invalid channel'),
-    body('priority').optional().isInt({ min: 1, max: 5 }).withMessage('Priority must be between 1 and 5')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const {
-        subject,
-        body,
-        recipient_type,
-        recipient_target,
-        scheduledAt,
-        channel = 'system_log',
-        type = 'info',
-        priority = 5,
-        originDetails = {}
-      } = req.body;
+router.delete('/rules/:id', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
 
-      // Validate scheduled time is in the future
-      const scheduledDate = new Date(scheduledAt);
-      if (scheduledDate <= new Date()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Scheduled time must be in the future'
-        });
-      }
+    const result = await pool.query(`
+      DELETE FROM rules WHERE id = $1
+      RETURNING name
+    `, [id]);
 
-      const enrichedOriginDetails = {
-        ...originDetails,
-        requestedBy: {
-          userId: req.user.id,
-          username: req.user.username,
-          role: req.user.role
-        },
-        service: 'NotificationAPI'
-      };
-
-      const result = await notificationService.sendNotification({
-        subject,
-        body,
-        recipient_type,
-        recipient_target,
-        channel,
-        type,
-        priority,
-        originDetails: enrichedOriginDetails,
-        scheduledAt: scheduledDate,
-        immediate: false
-      });
-
-      if (result.success) {
-        logger.info(`Notification scheduled via API by user ${req.user.username}:`, {
-          notificationId: result.notificationId,
-          scheduledAt,
-          channel
-        });
-
-        res.json({
-          success: true,
-          message: 'Notification scheduled successfully',
-          data: {
-            notificationId: result.notificationId,
-            scheduledAt,
-            messageId: result.messageId
-          }
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          message: result.message || 'Failed to schedule notification'
-        });
-      }
-
-    } catch (error) {
-      logger.error('Error in schedule notification API:', error);
-      res.status(500).json({
+    if (result.rows.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'Internal server error',
-        error: error.message
+        error: 'Regla no encontrada'
       });
     }
+
+    logger.info(`[NotificationRoutes] Rule deleted: ${result.rows[0].name} (ID: ${id})`);
+
+    res.json({
+      success: true,
+      message: 'Regla eliminada exitosamente'
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error deleting rule:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al eliminar regla de notificación'
+    });
   }
-);
+});
 
 /**
- * GET /api/notifications/:id
- * Get notification details by ID
+ * GET /api/notifications/contacts
+ * Obtener configuración de contactos del usuario
  */
-router.get('/api/notifications/:id',
-  authenticate,
-  [
-    param('id').isInt().withMessage('Notification ID must be an integer')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const notificationId = parseInt(req.params.id);
-      const notification = await notificationService.getNotification(notificationId);
+router.get('/contacts', auth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT username, notification_preferences
+      FROM users 
+      WHERE username = $1
+    `, [req.user.username]);
 
-      if (!notification) {
-        return res.status(404).json({
-          success: false,
-          message: 'Notification not found'
-        });
-      }
-
-      // Check if user can view this notification (admin or owner)
-      const canView = req.user.role === 'admin' || 
-                     notification.origin_details?.requestedBy?.userId === req.user.id;
-
-      if (!canView) {
-        return res.status(403).json({
-          success: false,
-          message: 'Access denied'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: notification
-      });
-
-    } catch (error) {
-      logger.error('Error getting notification:', error);
-      res.status(500).json({
+    if (result.rows.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'Internal server error',
-        error: error.message
+        error: 'Usuario no encontrado'
       });
     }
+
+    res.json({
+      success: true,
+      data: result.rows[0].notification_preferences || {}
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error fetching contacts:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener configuración de contactos'
+    });
   }
-);
+});
 
 /**
- * GET /api/notifications
- * List notifications with pagination and filters
+ * PUT /api/notifications/contacts
+ * Actualizar configuración de contactos del usuario
  */
-router.get('/api/notifications',
-  authenticate,
-  [
-    query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
-    query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
-    query('status').optional().isIn(['pending', 'sent', 'failed']).withMessage('Invalid status'),
-    query('channel').optional().isIn(['email', 'telegram', 'whatsapp', 'websocket', 'system_log']).withMessage('Invalid channel'),
-    query('priority').optional().isInt({ min: 1, max: 5 }).withMessage('Priority must be between 1 and 5')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const {
-        page = 1,
-        limit = 20,
-        status,
-        channel,
-        priority,
-        timeframe = '7 days'
-      } = req.query;
+router.put('/contacts', auth, async (req, res) => {
+  try {
+    const { email, telegram_chat_id, whatsapp_phone, enabled_channels, notification_hours } = req.body;
 
-      const offset = (page - 1) * limit;
+    const preferences = {
+      email: email || '',
+      telegram_chat_id: telegram_chat_id || '',
+      whatsapp_phone: whatsapp_phone || '',
+      enabled_channels: enabled_channels || ['system_log'],
+      notification_hours: notification_hours || { start: '08:00', end: '22:00' },
+      severity_filter: ['high', 'medium', 'low']
+    };
 
-      // Build query conditions
-      let whereConditions = [`created_at >= NOW() - INTERVAL '${timeframe}'`];
-      let queryParams = [];
-      let paramIndex = 1;
+    const result = await pool.query(`
+      UPDATE users 
+      SET notification_preferences = $1
+      WHERE username = $2
+      RETURNING username, notification_preferences
+    `, [JSON.stringify(preferences), req.user.username]);
 
-      // Non-admin users can only see their own notifications
-      if (req.user.role !== 'admin') {
-        whereConditions.push(`origin_details->>'requestedBy'->>'userId' = $${paramIndex}`);
-        queryParams.push(req.user.id.toString());
-        paramIndex++;
-      }
-
-      if (status) {
-        whereConditions.push(`status = $${paramIndex}`);
-        queryParams.push(status);
-        paramIndex++;
-      }
-
-      if (channel) {
-        whereConditions.push(`channel = $${paramIndex}`);
-        queryParams.push(channel);
-        paramIndex++;
-      }
-
-      if (priority) {
-        whereConditions.push(`priority = $${paramIndex}`);
-        queryParams.push(priority);
-        paramIndex++;
-      }
-
-      const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-
-      // Get total count
-      const countQuery = `SELECT COUNT(*) FROM notifications ${whereClause}`;
-      const countResult = await require('../config/db').query(countQuery, queryParams);
-      const totalCount = parseInt(countResult.rows[0].count);
-
-      // Get notifications
-      const query = `
-        SELECT id, subject, recipient_type, recipient_target, channel, priority, status, 
-               attempts, scheduled_at, sent_at, failed_at, error_message, created_at,
-               origin_service
-        FROM notifications 
-        ${whereClause}
-        ORDER BY created_at DESC 
-        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-      `;
-      
-      queryParams.push(limit, offset);
-      const result = await require('../config/db').query(query, queryParams);
-
-      const totalPages = Math.ceil(totalCount / limit);
-
-      res.json({
-        success: true,
-        data: {
-          notifications: result.rows,
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            totalCount,
-            totalPages,
-            hasNext: page < totalPages,
-            hasPrev: page > 1
-          }
-        }
-      });
-
-    } catch (error) {
-      logger.error('Error listing notifications:', error);
-      res.status(500).json({
+    if (result.rows.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: 'Internal server error',
-        error: error.message
+        error: 'Usuario no encontrado'
       });
     }
+
+    logger.info(`[NotificationRoutes] Contacts updated for user: ${req.user.username}`);
+
+    res.json({
+      success: true,
+      data: result.rows[0].notification_preferences,
+      message: 'Configuración de contactos actualizada'
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error updating contacts:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al actualizar configuración de contactos'
+    });
   }
-);
-
-/**
- * GET /api/notifications/stats
- * Get notification statistics
- */
-router.get('/stats/summary',
-  authenticate,
-  requireRole(['admin', 'editor']),
-  [
-    query('timeframe').optional().isIn(['1 hour', '24 hours', '7 days', '30 days']).withMessage('Invalid timeframe')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const { timeframe = '24 hours' } = req.query;
-      const stats = await notificationService.getNotificationStats(timeframe);
-
-      if (stats.success) {
-        res.json({
-          success: true,
-          data: {
-            timeframe,
-            stats: stats.stats
-          }
-        });
-      } else {
-        res.status(500).json({
-          success: false,
-          message: stats.error || 'Failed to get statistics'
-        });
-      }
-
-    } catch (error) {
-      logger.error('Error getting notification stats:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: error.message
-      });
-    }
-  }
-);
-
-/**
- * GET /api/notifications/templates
- * List available notification templates
- */
-router.get('/templates/list',
-  authenticate,
-  async (req, res) => {
-    try {
-      const result = await require('../config/db').query(`
-        SELECT id, name, subject_template, body_template, channels, priority, is_active, created_at
-        FROM notification_templates 
-        WHERE is_active = true 
-        ORDER BY name
-      `);
-
-      res.json({
-        success: true,
-        data: result.rows
-      });
-
-    } catch (error) {
-      logger.error('Error getting notification templates:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: error.message
-      });
-    }
-  }
-);
-
-/**
- * GET /api/notifications/templates/:name
- * Get specific template details
- */
-router.get('/templates/:name',
-  authenticate,
-  [
-    param('name').notEmpty().withMessage('Template name is required')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const template = await notificationService.getTemplate(req.params.name);
-
-      if (!template) {
-        return res.status(404).json({
-          success: false,
-          message: 'Template not found'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: template
-      });
-
-    } catch (error) {
-      logger.error('Error getting notification template:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: error.message
-      });
-    }
-  }
-);
+});
 
 /**
  * GET /api/notifications/channels
- * List available notification channels
+ * Obtener canales de notificación disponibles
  */
-router.get('/channels/list',
-  authenticate,
-  async (req, res) => {
-    try {
-      const result = await require('../config/db').query(`
-        SELECT name, is_active, rate_limit_per_minute, rate_limit_per_hour, 
-               rate_limit_per_day, created_at, updated_at
-        FROM notification_channels 
-        ORDER BY name
-      `);
+router.get('/channels', auth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT name, is_active, configuration
+      FROM notification_channels 
+      ORDER BY name ASC
+    `);
 
-      res.json({
-        success: true,
-        data: result.rows
-      });
-
-    } catch (error) {
-      logger.error('Error getting notification channels:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: error.message
-      });
-    }
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error fetching channels:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener canales de notificación'
+    });
   }
-);
+});
 
 /**
- * PUT /api/notifications/channels/:name
- * Update channel configuration (admin only)
+ * POST /api/notifications/test
+ * Enviar notificación de prueba
  */
-router.put('/channels/:name',
-  authenticate,
-  requireRole(['admin']),
-  [
-    param('name').notEmpty().withMessage('Channel name is required'),
-    body('is_active').optional().isBoolean().withMessage('is_active must be boolean'),
-    body('rate_limit_per_minute').optional().isInt({ min: 1 }).withMessage('rate_limit_per_minute must be positive integer'),
-    body('rate_limit_per_hour').optional().isInt({ min: 1 }).withMessage('rate_limit_per_hour must be positive integer'),
-    body('rate_limit_per_day').optional().isInt({ min: 1 }).withMessage('rate_limit_per_day must be positive integer')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
-    try {
-      const channelName = req.params.name;
-      const updates = req.body;
+router.post('/test', auth, async (req, res) => {
+  try {
+    const { channel = 'system_log', message = 'Notificación de prueba' } = req.body;
 
-      // Build update query
-      const updateFields = [];
-      const queryParams = [];
-      let paramIndex = 1;
+    // Get user contact preferences to determine recipient target
+    const userResult = await pool.query(
+      'SELECT notification_preferences FROM users WHERE username = $1',
+      [req.user.username]
+    );
 
-      for (const [field, value] of Object.entries(updates)) {
-        if (['is_active', 'rate_limit_per_minute', 'rate_limit_per_hour', 'rate_limit_per_day'].includes(field)) {
-          updateFields.push(`${field} = $${paramIndex}`);
-          queryParams.push(value);
-          paramIndex++;
-        }
+    let recipientTarget = req.user.username;
+    
+    if (userResult.rows.length > 0 && userResult.rows[0].notification_preferences) {
+      const prefs = userResult.rows[0].notification_preferences;
+      
+      // Get the appropriate recipient target based on channel
+      switch (channel) {
+        case 'email':
+          recipientTarget = prefs.email || 'admin@invernadero.com';
+          break;
+        case 'telegram':
+          recipientTarget = prefs.telegram_chat_id || 'TU_CHAT_ID';
+          break;
+        case 'whatsapp':
+          recipientTarget = prefs.whatsapp_phone || '+56912345678';
+          break;
+        default:
+          recipientTarget = req.user.username;
       }
-
-      if (updateFields.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'No valid fields to update'
-        });
-      }
-
-      updateFields.push(`updated_at = NOW()`);
-      queryParams.push(channelName);
-
-      const query = `
-        UPDATE notification_channels 
-        SET ${updateFields.join(', ')}
-        WHERE name = $${paramIndex}
-        RETURNING *
-      `;
-
-      const result = await require('../config/db').query(query, queryParams);
-
-      if (result.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Channel not found'
-        });
-      }
-
-      logger.info(`Channel ${channelName} updated by admin ${req.user.username}:`, updates);
-
-      res.json({
-        success: true,
-        message: 'Channel updated successfully',
-        data: result.rows[0]
-      });
-
-    } catch (error) {
-      logger.error('Error updating notification channel:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: error.message
-      });
     }
-  }
-);
 
-  return router;
-};
+    const testNotification = {
+      subject: 'Prueba de Notificación - Sistema IoT',
+      body: `🧪 **NOTIFICACIÓN DE PRUEBA**\n\n${message}\n\n📅 Enviado: ${new Date().toLocaleString('es-CL', { timeZone: 'America/Santiago' })}\n👤 Usuario: ${req.user.username}\n📡 Canal: ${channel}\n🎯 Destino: ${recipientTarget}`,
+      recipient_type: 'user',
+      recipient_target: recipientTarget,
+      priority: 5,
+      originDetails: { channel: channel }
+    };
+
+    const result = await notificationService.sendNotification(testNotification);
+
+    logger.info(`[NotificationRoutes] Test notification sent to ${req.user.username} via ${channel} (target: ${recipientTarget})`);
+
+    res.json({
+      success: true,
+      message: `Notificación de prueba enviada exitosamente por ${channel} a ${recipientTarget}`,
+      details: result
+    });
+  } catch (error) {
+    logger.error('[NotificationRoutes] Error sending test notification:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al enviar notificación de prueba'
+    });
+  }
+});
+
+module.exports = router;

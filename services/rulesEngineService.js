@@ -4,6 +4,7 @@ const logger = require('../config/logger');
 const redisClient = require('../config/redis');
 const operationService = require('./operationService');
 const { publishCriticalAction } = require('./queueService');
+const { sendNotification } = require('./notificationService');
 
 // Define SENSOR_HISTORY_MAX_LENGTH, mirroring the value in mqttService.js
 // TODO: Consider moving this to a shared config or environment variable
@@ -881,6 +882,101 @@ async function executeRuleActions(rule, contextDataForRule) {
             details: action.params.details || { ruleId: rule.id, ruleName: rule.name, custom_message: "Action triggered by rule." }
         });
         logger.info(`RulesEngine: Action executed for rule ${rule.id}: operationService.recordOperation`);
+      } else if (action.service === 'notificationService' && action.method === 'sendAlert') {
+        // Handle notification actions for threshold alerts
+        if (!action.params || !action.params.message) {
+            logger.error(`RulesEngine: Missing params.message for notificationService.sendAlert action in rule ${rule.id}: %j`, action);
+            await operationService.recordOperation({
+                serviceName: 'RulesEngineService', action: 'action_configuration_error', targetEntityType: 'rule',
+                targetEntityId: rule.id.toString(), status: 'FAILURE',
+                details: { ruleName: rule.name, action: action, error: `Missing params.message for notification` }
+            });
+            continue;
+        }
+
+        // Get user info and enabled notification channels
+        let usuario = 'usuario'; // Default fallback
+        try {
+          const userQuery = await pool.query('SELECT username FROM users WHERE id = $1', [action.params.recipient_user_id || 1]);
+          usuario = userQuery.rows.length > 0 ? userQuery.rows[0].username : 'usuario';
+        } catch (userError) {
+          logger.warn(`RulesEngine: Could not get user info, using default: ${userError.message}`);
+        }
+
+        // Debug logging for action params
+        logger.info(`RulesEngine: Rule ${rule.id} action params: ${JSON.stringify(action.params, null, 2)}`);
+
+        // Get notification channels from the rule action or use fallback
+        let enabledChannels = action.params.channels || ['email']; // Use rule-specific channels or default fallback
+        
+        logger.info(`RulesEngine: Rule ${rule.id} will use channels: ${enabledChannels.join(', ')}`);
+        
+        // If no specific channels in the rule, try to get user preferences
+        if (!action.params.channels) {
+          logger.info(`RulesEngine: Rule ${rule.id} has no specific channels, trying to get user preferences...`);
+          try {
+            const contactsQuery = await pool.query('SELECT enabled_channels FROM notification_contacts WHERE user_id = $1', [action.params.recipient_user_id || 1]);
+            if (contactsQuery.rows.length > 0 && contactsQuery.rows[0].enabled_channels) {
+              enabledChannels = contactsQuery.rows[0].enabled_channels;
+              logger.info(`RulesEngine: Rule ${rule.id} using user preference channels: ${enabledChannels.join(', ')}`);
+            }
+          } catch (contactsError) {
+            logger.warn(`RulesEngine: Could not get notification preferences for user, using default channels: ${contactsError.message}`);
+          }
+        } else {
+          logger.info(`RulesEngine: Rule ${rule.id} using rule-specific channels: ${enabledChannels.join(', ')}`);
+        }
+
+        // Send notification to each enabled channel
+        for (const canal of enabledChannels) {
+            if (['email', 'telegram', 'whatsapp'].includes(canal)) {
+                try {
+                    // Prepare the notification message in the format expected by n8n
+                    const notificationMessage = {
+                        usuario: usuario,
+                        canal: canal,
+                        mensaje: action.params.message
+                    };
+
+                    const notificationResult = await sendNotification({
+                        subject: `Alerta: ${rule.name}`,
+                        body: JSON.stringify(notificationMessage),
+                        recipient_type: 'webhook',
+                        recipient_target: canal,
+                        type: 'alert',
+                        originDetails: { 
+                            ruleId: rule.id, 
+                            ruleName: rule.name, 
+                            channel: canal,
+                            notificationPayload: notificationMessage
+                        }
+                    });
+
+                    if (notificationResult.success) {
+                        logger.info(`RulesEngine: Alert notification sent via ${canal} for rule ${rule.id}: ${action.params.message}`);
+                    } else {
+                        logger.error(`RulesEngine: Failed to send alert notification via ${canal} for rule ${rule.id}: ${notificationResult.message}`);
+                    }
+
+                } catch (notificationError) {
+                    logger.error(`RulesEngine: Error sending notification via ${canal} for rule ${rule.id}:`, notificationError);
+                    await operationService.recordOperation({
+                        serviceName: 'RulesEngineService', action: 'notification_send_error', targetEntityType: 'rule',
+                        targetEntityId: rule.id.toString(), status: 'FAILURE',
+                        details: { ruleName: rule.name, action: action, channel: canal, error: notificationError.message }
+                    });
+                }
+            }
+        }
+
+        // Record successful notification attempt
+        await operationService.recordOperation({
+            serviceName: 'RulesEngineService', action: 'notification_alert_sent', targetEntityType: 'rule',
+            targetEntityId: rule.id.toString(), status: 'SUCCESS',
+            details: { ruleName: rule.name, action: action, channels: enabledChannels, message: action.params.message }
+        });
+        
+        logger.info(`RulesEngine: Alert notification action executed for rule ${rule.id} via channels: ${enabledChannels.join(', ')}`);
       } else {
         logger.warn(`RulesEngine: Unsupported action service/method in rule ${rule.id}: ${action.service}.${action.method}`);
          await operationService.recordOperation({

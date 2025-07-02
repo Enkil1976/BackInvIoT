@@ -11,9 +11,12 @@ const dataRoutes = require('./routes/data');
 const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
 const weatherRoutes = require('./routes/weather');
+const notificationRoutes = require('./routes/notifications');
 const errorHandler = require('./middleware/errorHandler');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 const weatherScheduler = require('./services/weatherScheduler');
+const { startRulesEngine, stopRulesEngine, initRulesEngineService } = require('./services/rulesEngineService');
+const { initNotificationService } = require('./services/notificationService');
 const { toChileLogString } = require('./config/timezone');
 
 const app = express();
@@ -60,6 +63,7 @@ app.use('/api', dataRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/weather', weatherRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Error handler
 app.use(errorHandler);
@@ -81,6 +85,24 @@ const server = app.listen(PORT, () => {
   } catch (error) {
     logger.error('❌ Weather Scheduler initialization failed:', error);
   }
+
+  // Inicializar servicios de notificaciones y motor de reglas
+  logger.info('🔔 Initializing Notification Service...');
+  try {
+    initNotificationService();
+    logger.info('✅ Notification Service initialized successfully');
+  } catch (error) {
+    logger.error('❌ Notification Service initialization failed:', error);
+  }
+
+  logger.info('⚙️ Initializing Rules Engine...');
+  try {
+    initRulesEngineService();
+    startRulesEngine();
+    logger.info('✅ Rules Engine initialized and started successfully');
+  } catch (error) {
+    logger.error('❌ Rules Engine initialization failed:', error);
+  }
 });
 
 process.on('SIGTERM', () => {
@@ -88,6 +110,7 @@ process.on('SIGTERM', () => {
     // Desconectar servicios
     disconnectMqtt();
     weatherScheduler.stop();
+    stopRulesEngine();
     pool.end();
     redisClient.disconnect();
     logger.info('Server terminated');
@@ -101,6 +124,7 @@ process.on('SIGINT', () => {
   server.close(() => {
     disconnectMqtt();
     weatherScheduler.stop();
+    stopRulesEngine();
     pool.end();
     redisClient.disconnect();
     logger.info('Server terminated');

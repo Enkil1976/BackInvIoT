@@ -1,7 +1,10 @@
 const logger = require('../config/logger');
-const operationService = require('./operationService'); // To log the notification action
+const operationService = require('./operationService');
+const pool = require('../config/db');
+const jwt = require('jsonwebtoken');
 
-let _broadcastWebSocket = null; // Included for consistency, though not used initially
+const JWT_SECRET = process.env.JWT_SECRET;
+let _broadcastWebSocket = null;
 
 /**
  * Initializes the NotificationService with dependencies.
@@ -63,11 +66,93 @@ async function sendNotification({
       details: { subject, body, type, originDetails }
     });
 
-    // Future: Implement actual sending mechanisms based on recipient_type
-    // e.g., if (recipient_type === 'email') { /* ... send email ... */ }
-    // e.g., if (recipient_type === 'user_id' && _broadcastWebSocket) { /* ... send targeted WebSocket ... */ }
+    // Send notification through configured channels
+    let actualDeliveryStatus = 'logged';
+    
+    // Get channel configuration if specified
+    const channelName = originDetails.channel || 'system_log';
+    
+    try {
+      const channelResult = await pool.query(
+        'SELECT webhook_url, auth_token, payload_template FROM notification_channels WHERE name = $1 AND is_active = true',
+        [channelName]
+      );
+      
+      if (channelResult.rows.length > 0 && channelResult.rows[0].webhook_url) {
+        const channel = channelResult.rows[0];
+        
+        // Check if we have a notification payload in the body (for rules engine alerts)
+        let payload;
+        try {
+          const bodyObj = JSON.parse(body);
+          if (bodyObj && bodyObj.usuario && bodyObj.canal && bodyObj.mensaje) {
+            // This is a rules engine alert, use the specific format for n8n
+            payload = bodyObj;
+            logger.info(`NotificationService: Using rules engine alert format for ${channelName}:`, payload);
+          } else {
+            throw new Error('Not a rules engine alert format');
+          }
+        } catch (parseError) {
+          // Fallback to template-based payload replacement
+          let payloadStr = JSON.stringify(channel.payload_template)
+            .replace(/{{recipient_target}}/g, recipient_target)
+            .replace(/{{subject}}/g, subject)
+            .replace(/{{body}}/g, body);
+          
+          // Check if priority is defined before using it
+          if (typeof priority !== 'undefined') {
+            payloadStr = payloadStr.replace(/{{priority}}/g, priority.toString());
+          }
+          
+          payload = JSON.parse(payloadStr);
+        }
+        
+        logger.info(`NotificationService: Sending to ${channelName} webhook: ${channel.webhook_url}`);
+        
+        // Send to n8n webhook
+        const fetch = require('node-fetch');
+        
+        // Generate JWT token for n8n webhook authentication
+        const webhookToken = jwt.sign(
+          { 
+            service: 'notification_service',
+            channel: channelName,
+            timestamp: Date.now()
+          }, 
+          JWT_SECRET, 
+          { 
+            expiresIn: '5m' // Token válido por 5 minutos
+          }
+        );
+        
+        const response = await fetch(channel.webhook_url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${webhookToken}`
+          },
+          body: JSON.stringify(payload)
+        });
+        
+        if (response.ok) {
+          actualDeliveryStatus = `sent_${channelName}`;
+          const responseText = await response.text();
+          logger.info(`NotificationService: Successfully sent ${channelName} notification via webhook. Response: ${responseText}`);
+        } else {
+          const errorText = await response.text();
+          logger.error(`NotificationService: Webhook failed for ${channelName}: ${response.status} ${response.statusText}. Response: ${errorText}`);
+          actualDeliveryStatus = `failed_${channelName}`;
+        }
+      } else {
+        logger.info(`NotificationService: No active webhook configured for channel: ${channelName}`);
+      }
+    } catch (webhookError) {
+      logger.error(`NotificationService: Error sending webhook for ${channelName}:`, webhookError.message);
+      logger.error(`NotificationService: Full error details:`, webhookError);
+      actualDeliveryStatus = `error_${channelName}`;
+    }
 
-    return { success: true, message: `Notification logged for ${recipient_type}: ${recipient_target}` };
+    return { success: true, message: `Notification ${actualDeliveryStatus} for ${recipient_type}: ${recipient_target}` };
   } catch (error) {
     logger.error('NotificationService: Error during sendNotification processing (e.g., logging operation):', error);
     // Return failure if logging operation fails, as it's part of its current core job
