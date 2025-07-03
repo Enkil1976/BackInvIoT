@@ -12,6 +12,7 @@ const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
 const weatherRoutes = require('./routes/weather');
 const notificationRoutes = require('./routes/notifications');
+const notificationTemplateRoutes = require('./routes/notificationTemplate');
 const errorHandler = require('./middleware/errorHandler');
 const { connectMqtt, disconnectMqtt } = require('./services/mqttService');
 const weatherScheduler = require('./services/weatherScheduler');
@@ -64,6 +65,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/weather', weatherRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/notification-templates', notificationTemplateRoutes);
 
 // Error handler
 app.use(errorHandler);

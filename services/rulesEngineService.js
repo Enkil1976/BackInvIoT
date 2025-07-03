@@ -5,6 +5,7 @@ const redisClient = require('../config/redis');
 const operationService = require('./operationService');
 const { publishCriticalAction } = require('./queueService');
 const { sendNotification } = require('./notificationService');
+const notificationTemplateService = require('./notificationTemplateService');
 
 // Priority-based cooldown periods (in minutes)
 const PRIORITY_COOLDOWNS = {
@@ -977,10 +978,21 @@ async function executeRuleActions(rule, contextDataForRule) {
             if (['email', 'telegram', 'whatsapp'].includes(canal)) {
                 try {
                     // Prepare the notification message in the format expected by n8n
+                    // Process template variables in the message
+                    const processedMessage = await notificationTemplateService.processTemplate(
+                        action.params.message, 
+                        {
+                            'rule.name': rule.name,
+                            'rule.id': rule.id,
+                            'rule.priority': rule.priority,
+                            'timestamp': new Date().toISOString()
+                        }
+                    );
+
                     const notificationMessage = {
                         usuario: usuario,
                         canal: canal,
-                        mensaje: action.params.message
+                        mensaje: processedMessage
                     };
 
                     const notificationResult = await sendNotification({
