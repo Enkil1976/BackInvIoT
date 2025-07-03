@@ -256,12 +256,84 @@ class WeatherService {
    * @returns {Object} Información de configuración
    */
   getServiceInfo() {
+    const isCoordinates = this.isCoordinateFormat(this.location);
+    let locationInfo = {
+      value: this.location,
+      type: isCoordinates ? 'coordinates' : 'city_name',
+      description: isCoordinates ? 'Coordenadas exactas (lat,lon)' : 'Nombre de ciudad/región'
+    };
+
+    if (isCoordinates) {
+      const [lat, lon] = this.location.split(',').map(coord => parseFloat(coord.trim()));
+      locationInfo.coordinates = { latitude: lat, longitude: lon };
+    }
+
     return {
       configured: this.isConfigured(),
       location: this.location,
+      locationInfo: locationInfo,
       apiUrl: this.baseUrl,
       hasApiKey: !!this.apiKey
     };
+  }
+
+  /**
+   * Actualiza la ubicación del servicio meteorológico
+   * @param {string} newLocation - Nueva ubicación (nombre de ciudad o coordenadas lat,lon)
+   */
+  updateLocation(newLocation) {
+    if (!newLocation || typeof newLocation !== 'string') {
+      throw new Error('Invalid location parameter. Must be a non-empty string.');
+    }
+    
+    const cleanLocation = newLocation.trim();
+    
+    // Verificar si es formato de coordenadas
+    if (this.isCoordinateFormat(cleanLocation)) {
+      const [lat, lon] = cleanLocation.split(',').map(coord => parseFloat(coord.trim()));
+      if (this.isValidCoordinates(lat, lon)) {
+        console.log(`[WeatherService] Updating location from '${this.location}' to coordinates: ${lat},${lon}`);
+        this.location = `${lat},${lon}`;
+        console.log(`[WeatherService] Location updated successfully to coordinates: ${this.location}`);
+      } else {
+        throw new Error('Invalid coordinates. Latitude must be between -90 and 90, longitude between -180 and 180.');
+      }
+    } else {
+      console.log(`[WeatherService] Updating location from '${this.location}' to '${cleanLocation}'`);
+      this.location = cleanLocation;
+      console.log(`[WeatherService] Location updated successfully to: ${this.location}`);
+    }
+  }
+
+  /**
+   * Verifica si una cadena tiene formato de coordenadas (lat,lon)
+   * @param {string} location - Ubicación a verificar
+   * @returns {boolean} True si es formato de coordenadas
+   */
+  isCoordinateFormat(location) {
+    const coordinatePattern = /^-?\d+\.?\d*,-?\d+\.?\d*$/;
+    return coordinatePattern.test(location);
+  }
+
+  /**
+   * Valida si las coordenadas son válidas
+   * @param {number} lat - Latitud
+   * @param {number} lon - Longitud
+   * @returns {boolean} True si son coordenadas válidas
+   */
+  isValidCoordinates(lat, lon) {
+    return !isNaN(lat) && !isNaN(lon) && 
+           lat >= -90 && lat <= 90 && 
+           lon >= -180 && lon <= 180;
+  }
+
+  /**
+   * Resetea la ubicación a la configurada por defecto en variables de entorno
+   */
+  resetLocationToDefault() {
+    const defaultLocation = process.env.WEATHER_LOCATION || 'las chilcas,Villarrica,Chile';
+    console.log(`[WeatherService] Resetting location to default: ${defaultLocation}`);
+    this.location = defaultLocation;
   }
 }
 
