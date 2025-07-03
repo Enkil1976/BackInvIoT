@@ -321,4 +321,116 @@ router.get('/config',
   }
 );
 
+/**
+ * @route PUT /api/weather/config
+ * @desc Update weather service configuration (location)
+ * @access Protected - Admin only
+ */
+router.put('/config', 
+  protect, 
+  authorize('admin'),
+  async (req, res, next) => {
+    try {
+      const { location } = req.body;
+      
+      if (!location || typeof location !== 'string') {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Invalid location parameter. Must be a non-empty string.' 
+        });
+      }
+
+      logger.info('[WeatherRoutes] Updating weather service location', { 
+        user: req.user.username, 
+        location 
+      });
+
+      // Validar la ubicación haciendo una prueba de conexión
+      try {
+        const testWeather = await weatherService.getCurrentWeather(location);
+        logger.info(`[WeatherRoutes] Location test successful for: ${location}`);
+      } catch (testError) {
+        logger.error('[WeatherRoutes] Location test failed:', testError);
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid location. Could not fetch weather data for this location.',
+          message: testError.message
+        });
+      }
+
+      // Actualizar la configuración del servicio
+      weatherService.updateLocation(location);
+      
+      const updatedConfig = weatherService.getServiceInfo();
+      
+      logger.info('[WeatherRoutes] Weather service location updated successfully', { location });
+      
+      res.json({
+        success: true,
+        message: 'Weather service location updated successfully',
+        config: updatedConfig
+      });
+    } catch (error) {
+      logger.error('[WeatherRoutes] Error updating weather config:', error);
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route POST /api/weather/test-location
+ * @desc Test a location without saving it
+ * @access Protected - Admin only
+ */
+router.post('/test-location', 
+  protect, 
+  authorize('admin'),
+  async (req, res, next) => {
+    try {
+      const { location } = req.body;
+      
+      if (!location || typeof location !== 'string') {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Invalid location parameter. Must be a non-empty string.' 
+        });
+      }
+
+      logger.info('[WeatherRoutes] Testing weather location', { 
+        user: req.user.username, 
+        location 
+      });
+
+      // Probar la ubicación
+      const testWeather = await weatherService.getCurrentWeather(location);
+      
+      res.json({
+        success: true,
+        message: `Location "${location}" is valid`,
+        locationInfo: {
+          name: testWeather.location.name,
+          region: testWeather.location.region,
+          country: testWeather.location.country,
+          lat: testWeather.location.lat,
+          lon: testWeather.location.lon,
+          timezone: testWeather.location.timezone
+        },
+        currentWeather: {
+          temperatura: testWeather.current.temperatura,
+          condicion: testWeather.current.condicion,
+          humedad: testWeather.current.humedad,
+          presion: testWeather.current.presion
+        }
+      });
+    } catch (error) {
+      logger.error('[WeatherRoutes] Error testing weather location:', error);
+      res.status(400).json({ 
+        success: false,
+        error: 'Invalid location or weather service error',
+        message: error.message 
+      });
+    }
+  }
+);
+
 module.exports = router;
